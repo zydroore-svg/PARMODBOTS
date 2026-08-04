@@ -33,6 +33,22 @@ import admin from 'firebase-admin';
 // FFmpeg binary for audio transcoding (used by prism-media under the hood)
 if (ffmpegPath) process.env.FFMPEG_PATH = ffmpegPath;
 
+// play-dl auth — cloud hosts (Railway, Render, AWS, etc.) get IP-blocked by
+// YouTube's bot detection ("Sign in to confirm you're not a bot") far more
+// often than a home connection does. Setting YOUTUBE_COOKIE in your env
+// authenticates play-dl as a real logged-in browser session and usually
+// fixes streams that fail 100% of the time. Optional — only runs if set.
+if (process.env.YOUTUBE_COOKIE) {
+  try {
+    await play.setToken({ youtube: { cookie: process.env.YOUTUBE_COOKIE } });
+    console.log('🍪 play-dl authenticated with YouTube cookie');
+  } catch (err) {
+    console.error('❌ Failed to set play-dl YouTube cookie:', err.message);
+  }
+} else {
+  console.log('ℹ️  No YOUTUBE_COOKIE set — if music streams keep failing, this is likely why. See chat for setup steps.');
+}
+
 // ── 1. ENV VALIDATION ────────────────────────────────────────
 const {
   DISCORD_BOT_TOKEN,
@@ -56,8 +72,12 @@ const WELLNESS_CHANNEL_ID = process.env.WELLNESS_CHANNEL_ID || LOG_CHANNEL_ID;
 const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 60;
 const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 300;
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
+// How long a user has to hit "I'm okay" before it counts as a failed check / strike.
+const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 15;
+const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 60 * 1000;
 
 console.log(`🩺 Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
+console.log(`🩺 Response window: ${WELLNESS_RESPONSE_MINUTES} min before a missed check counts as a strike`);
 
 process.on('unhandledRejection', (reason) => console.error('❌ Unhandled promise rejection:', reason));
 process.on('uncaughtException', (err) => { console.error('❌ Uncaught exception:', err); process.exit(1); });
@@ -205,9 +225,34 @@ async function sendModLog(guild, embed) {
   if (logChannel) await logChannel.send({ embeds: [embed] }).catch(console.error);
 }
 
+// ── Interaction dedup lock ──────────────────────────────────────
+// Guards against the SAME interaction being handled twice, which happens
+// when two bot processes are alive at once (e.g. a local dev instance and
+// a deployed one, or an old deploy that hasn't fully shut down) — Discord
+// dispatches gateway events to every live connection for the bot token, so
+// both processes will otherwise try to answer the same command/button and
+// you get duplicate replies like two "Shift Ended" embeds back to back.
+// This claims the interaction ID in Firestore; whichever process gets
+// there first wins, the other backs off silently.
+async function claimInteraction(interaction) {
+  try {
+    await db.collection('processedInteractions').doc(interaction.id).create({
+      handledAt: FieldValue.serverTimestamp(),
+    });
+    return true;
+  } catch (err) {
+    // ALREADY_EXISTS (code 6) means another instance already claimed it.
+    if (err.code === 6 || err.code === 'already-exists') return false;
+    // On any other error (e.g. transient Firestore issue), fail open so a
+    // Firestore hiccup doesn't silently eat real commands.
+    console.error('claimInteraction error, proceeding anyway:', err);
+    return true;
+  }
+}
+
 // ── Firebase helpers (firebase-admin syntax) ────────────────────
 
-async function addWarning(targetUser, moderator, reason, guildId) {
+async function addWarning(targetUser, moderator, reason, guildId, extra = {}) {
   const ref = await db.collection('warnings').add({
     userId: targetUser.id,
     username: targetUser.tag,
@@ -216,6 +261,7 @@ async function addWarning(targetUser, moderator, reason, guildId) {
     reason,
     guildId,
     createdAt: FieldValue.serverTimestamp(),
+    ...extra,
   });
   return ref.id;
 }
@@ -286,6 +332,11 @@ async function createShift(guildId, userId, username) {
     startedAt: now,
     activeSince: now,
     lastWellnessCheckAt: now,
+    // Wellness check response tracking
+    pendingCheckSentAt: null,
+    pendingCheckMessageId: null,
+    pendingCheckChannelId: null,
+    strikes: 0,
     createdAt: now,
     updatedAt: now,
   });
@@ -303,57 +354,144 @@ async function getActiveGuildShifts(guildId) {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
+// Issue a wellness-check strike — logged into the same `warnings` collection
+// so it shows up in /warnings and /modlogs like any other warning.
+async function addWellnessStrike(guildId, userId, username, reason) {
+  const ref = await db.collection('warnings').add({
+    userId,
+    username,
+    moderatorId: client.user.id,
+    moderatorTag: client.user.tag,
+    reason,
+    guildId,
+    type: 'wellness_strike',
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  return ref.id;
+}
+
 // ── Wellness check scheduler ────────────────────────────────────
+
+async function sendWellnessCheck(channel, shift, now) {
+  const startedMs = shift.startedAt?.toDate?.().getTime() ?? now;
+
+  const embed = new EmbedBuilder()
+    .setColor('#faa61a')
+    .setTitle('🩺 Wellness Check')
+    .setDescription(
+      `Hey <@${shift.userId}>, you've been on duty for a while — just checking in on you!\n\n` +
+      `You have **${WELLNESS_RESPONSE_MINUTES} minutes** to acknowledge this or you'll receive a strike.`
+    )
+    .addFields(
+      { name: '🕒 On Shift For', value: formatDuration(now - startedMs), inline: true },
+      { name: '📋 Status',       value: 'ON DUTY',                      inline: true },
+    )
+    .setFooter({ text: "Tap the button below to let us know you're okay." })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`wellness_ack_${shift.userId}`)
+      .setLabel("I'm okay")
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success)
+  );
+
+  let sentMsg;
+  try {
+    sentMsg = await channel.send({ content: `<@${shift.userId}>`, embeds: [embed], components: [row] });
+  } catch (err) {
+    console.error('Wellness check send failed:', err);
+    return;
+  }
+
+  await updateShift(shift.guildId, shift.userId, {
+    lastWellnessCheckAt: Timestamp.now(),
+    pendingCheckSentAt: Timestamp.now(),
+    pendingCheckMessageId: sentMsg.id,
+    pendingCheckChannelId: channel.id,
+    updatedAt: Timestamp.now(),
+  });
+}
+
+async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
+  const newStrikeCount = (shift.strikes || 0) + 1;
+
+  await updateShift(shift.guildId, shift.userId, {
+    pendingCheckSentAt: null,
+    pendingCheckMessageId: null,
+    pendingCheckChannelId: null,
+    strikes: newStrikeCount,
+    lastWellnessCheckAt: Timestamp.now(), // restart the clock for the next check
+    updatedAt: Timestamp.now(),
+  });
+
+  await addWellnessStrike(
+    shift.guildId,
+    shift.userId,
+    shift.username,
+    `Failed to acknowledge wellness check within ${WELLNESS_RESPONSE_MINUTES} minutes`
+  ).catch((err) => console.error('Failed to log wellness strike:', err));
+
+  // Disable/mark the original check message so it's clear it timed out.
+  if (shift.pendingCheckMessageId && shift.pendingCheckChannelId) {
+    try {
+      const oldChannel = guild.channels.cache.get(shift.pendingCheckChannelId)
+        || await guild.channels.fetch(shift.pendingCheckChannelId).catch(() => null);
+      const oldMsg = oldChannel && await oldChannel.messages.fetch(shift.pendingCheckMessageId).catch(() => null);
+      if (oldMsg && oldMsg.embeds[0]) {
+        const failedEmbed = EmbedBuilder.from(oldMsg.embeds[0])
+          .setColor('#ed4245')
+          .setFooter({ text: '❌ No response — strike issued' });
+        await oldMsg.edit({ embeds: [failedEmbed], components: [] }).catch(() => {});
+      }
+    } catch { /* best effort */ }
+  }
+
+  const failEmbed = new EmbedBuilder()
+    .setColor('#ed4245')
+    .setTitle('❌ Wellness Check Failed')
+    .setDescription(`<@${shift.userId}> did not respond to their wellness check within ${WELLNESS_RESPONSE_MINUTES} minutes.`)
+    .addFields({ name: '⚠️ Strike Count', value: `${newStrikeCount}`, inline: true })
+    .setTimestamp();
+
+  await fallbackChannel.send({ embeds: [failEmbed] }).catch((err) => console.error('Failed to post strike notice:', err));
+}
+
 async function runWellnessCheck() {
   try {
+    const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
+    if (!guild) return;
+    const channel = guild.channels.cache.get(WELLNESS_CHANNEL_ID) || await guild.channels.fetch(WELLNESS_CHANNEL_ID).catch(() => null);
+    if (!channel) return;
+
     const snap = await db.collection('shifts')
       .where('guildId', '==', GUILD_ID)
       .where('status', '==', 'active')
       .get();
     if (snap.empty) return;
 
-    const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
-    if (!guild) return;
-    const channel = guild.channels.cache.get(WELLNESS_CHANNEL_ID) || await guild.channels.fetch(WELLNESS_CHANNEL_ID).catch(() => null);
-    if (!channel) return;
-
     const now = Date.now();
     const thresholdMs = WELLNESS_CHECK_MINUTES * 60 * 1000;
 
     for (const docSnap of snap.docs) {
-      const shift = docSnap.data();
+      const shift = { guildId: GUILD_ID, ...docSnap.data() };
+
+      // ── If a check is already outstanding, see if it timed out ──
+      if (shift.pendingCheckSentAt) {
+        const sentMs = shift.pendingCheckSentAt?.toDate?.().getTime();
+        if (sentMs && now - sentMs >= WELLNESS_RESPONSE_MS) {
+          await handleFailedWellnessCheck(guild, channel, shift);
+        }
+        continue; // don't send a new check while one is (or just was) pending
+      }
+
+      // ── Otherwise, see if a new wellness check is due ──
       const checkpointMs = (shift.lastWellnessCheckAt || shift.activeSince || shift.startedAt)?.toDate?.().getTime();
       if (!checkpointMs) continue;
       if (now - checkpointMs < thresholdMs) continue;
 
-      const startedMs = shift.startedAt?.toDate?.().getTime() ?? now;
-
-      const embed = new EmbedBuilder()
-        .setColor('#faa61a')
-        .setTitle('🩺 Wellness Check')
-        .setDescription(`Hey <@${shift.userId}>, you've been on duty for a while — just checking in on you!`)
-        .addFields(
-          { name: '🕒 On Shift For', value: formatDuration(now - startedMs), inline: true },
-          { name: '📋 Status',       value: 'ON DUTY',                      inline: true },
-        )
-        .setFooter({ text: "Tap the button below to let us know you're okay." })
-        .setTimestamp();
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`wellness_ack_${shift.userId}`)
-          .setLabel("I'm okay")
-          .setEmoji('✅')
-          .setStyle(ButtonStyle.Success)
-      );
-
-      try {
-        await channel.send({ content: `<@${shift.userId}>`, embeds: [embed], components: [row] });
-      } catch (err) {
-        console.error('Wellness check send failed:', err);
-      }
-
-      await updateShift(GUILD_ID, shift.userId, { lastWellnessCheckAt: Timestamp.now() });
+      await sendWellnessCheck(channel, shift, now);
     }
   } catch (err) {
     console.error('Wellness check error:', err);
@@ -378,9 +516,10 @@ async function playNextInQueue(guild) {
     resource.volume.setVolume(mq.volume ?? 1);
     mq.player.play(resource);
   } catch (err) {
-    console.error('Music stream error:', err);
+    console.error(`Music stream error for "${song.title}" (${song.url}):`, err);
     mq.songs.shift();
-    mq.textChannel?.send(`⚠️ Skipped **${song.title}** — failed to stream it.`).catch(() => {});
+    const reason = err?.message ? err.message.slice(0, 300) : 'unknown error';
+    mq.textChannel?.send(`⚠️ Skipped **${song.title}** — failed to stream it.\n\`\`\`${reason}\`\`\``).catch(() => {});
     return playNextInQueue(guild);
   }
 }
@@ -431,6 +570,14 @@ app.listen(PORT || 3001, '0.0.0.0', () => console.log(`🌐 Health check listeni
 
 // ── 7. Interaction handler ────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
+  // Dedup guard — if another live process already claimed this exact
+  // interaction, stop here so we never send a duplicate reply.
+  const claimed = await claimInteraction(interaction);
+  if (!claimed) {
+    console.warn(`⚠️ Duplicate interaction ${interaction.id} ignored — another bot instance already handled it. If you keep seeing this, check for a second running process.`);
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) {
     // ── Wellness check acknowledge button ─────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('wellness_ack_')) {
@@ -442,6 +589,20 @@ client.on('interactionCreate', async (interaction) => {
       const embed = EmbedBuilder.from(original)
         .setColor('#57f287')
         .setFooter({ text: `✅ Acknowledged by ${interaction.user.tag}` });
+
+      // Clear the pending-check state so the poller stops counting toward a strike.
+      try {
+        await updateShift(GUILD_ID, targetId, {
+          pendingCheckSentAt: null,
+          pendingCheckMessageId: null,
+          pendingCheckChannelId: null,
+          lastWellnessCheckAt: Timestamp.now(),
+          updatedAt: Timestamp.now(),
+        });
+      } catch (err) {
+        console.error('Failed to clear pending wellness check on ack:', err);
+      }
+
       return interaction.update({ embeds: [embed], components: [] });
     }
     return;
@@ -612,7 +773,8 @@ client.on('interactionCreate', async (interaction) => {
 
     const fields = warns.slice(0, 10).map((w, i) => {
       const ts = w.createdAt?.toDate ? Math.floor(w.createdAt.toDate().getTime() / 1000) : 0;
-      return { name: `#${i + 1} — ID: \`${w.id}\``, value: `**Reason:** ${w.reason}\n**By:** ${w.moderatorTag}\n**When:** ${ts ? `<t:${ts}:R>` : 'Unknown'}` };
+      const tag = w.type === 'wellness_strike' ? ' 🩺' : '';
+      return { name: `#${i + 1}${tag} — ID: \`${w.id}\``, value: `**Reason:** ${w.reason}\n**By:** ${w.moderatorTag}\n**When:** ${ts ? `<t:${ts}:R>` : 'Unknown'}` };
     });
 
     const embed = new EmbedBuilder().setColor('#fee75c')
@@ -829,7 +991,7 @@ client.on('interactionCreate', async (interaction) => {
         await createShift(guildId, userId, interaction.user.username);
         const embed = new EmbedBuilder().setColor('#57f287')
           .setTitle('🟢 Shift Started')
-          .setDescription(`<@${userId}> is now **ON DUTY**. You'll get a wellness check-in every ${WELLNESS_CHECK_MINUTES} minutes while active.`)
+          .setDescription(`<@${userId}> is now **ON DUTY**. You'll get a wellness check-in every ${WELLNESS_CHECK_MINUTES} minutes while active — you'll have ${WELLNESS_RESPONSE_MINUTES} minutes to respond before a strike is issued.`)
           .setTimestamp();
         await interaction.reply({ embeds: [embed] });
         return sendModLog(interaction.guild, embed);
@@ -860,7 +1022,14 @@ client.on('interactionCreate', async (interaction) => {
 
         if (sub === 'end') {
           const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
-          await updateShift(guildId, userId, { status: 'ended', endedAt: Timestamp.now(), updatedAt: Timestamp.now() });
+          await updateShift(guildId, userId, {
+            status: 'ended',
+            endedAt: Timestamp.now(),
+            pendingCheckSentAt: null,
+            pendingCheckMessageId: null,
+            pendingCheckChannelId: null,
+            updatedAt: Timestamp.now(),
+          });
           const embed = new EmbedBuilder().setColor('#ed4245')
             .setTitle('🔴 Shift Ended')
             .setDescription(`<@${userId}> has clocked out.`)
@@ -882,7 +1051,8 @@ client.on('interactionCreate', async (interaction) => {
           .map((s, i) => {
             const started = s.startedAt?.toDate?.().getTime() ?? now;
             const statusIcon = s.status === 'active' ? '🟢' : '⏸️';
-            return `${i + 1}. ${statusIcon} <@${s.userId}> — ${formatDuration(now - started)} (${s.status.toUpperCase()})`;
+            const strikeTag = s.strikes ? ` — ⚠️ ${s.strikes} strike(s)` : '';
+            return `${i + 1}. ${statusIcon} <@${s.userId}> — ${formatDuration(now - started)} (${s.status.toUpperCase()})${strikeTag}`;
           });
 
         const embed = new EmbedBuilder().setColor('#5865f2')
