@@ -27,6 +27,7 @@ import {
 } from '@discordjs/voice';
 import play from 'play-dl';
 import ffmpegPath from 'ffmpeg-static';
+import spotifyUrlInfoPkg from 'spotify-url-info';
 
 import admin from 'firebase-admin';
 
@@ -48,6 +49,12 @@ if (process.env.YOUTUBE_COOKIE) {
 } else {
   console.log('ℹ️  No YOUTUBE_COOKIE set — if music streams keep failing, this is likely why. See chat for setup steps.');
 }
+
+// Spotify link resolution — spotify-url-info scrapes the public embed page,
+// so no Spotify API key/app registration is needed. It just needs a fetch
+// implementation; Node 18+ ships one globally, which Railway's default
+// Node image already has.
+const { getData: getSpotifyData, getTracks: getSpotifyTracks } = spotifyUrlInfoPkg(fetch);
 
 // ── 1. ENV VALIDATION ────────────────────────────────────────
 const {
@@ -194,7 +201,7 @@ const SLASH_COMMANDS = [
   { name: 'massmove',     description: 'Move everyone from one voice channel to another', options: [{ name: 'from', description: 'Source voice channel', type: 7, required: true }, { name: 'to', description: 'Destination voice channel', type: 7, required: true }] },
 
   // ── Music ──
-  { name: 'play',       description: 'Play a song (search or URL) in your voice channel', options: [{ name: 'query', description: 'Song name or YouTube URL', type: 3, required: true }] },
+  { name: 'play',       description: 'Play a song — YouTube search/URL or a Spotify track/playlist link', options: [{ name: 'query', description: 'Song name, YouTube URL, or Spotify track/playlist link', type: 3, required: true }] },
   { name: 'pause',      description: 'Pause the current song' },
   { name: 'resume',     description: 'Resume the current song' },
   { name: 'skip',       description: 'Skip the current song' },
@@ -673,6 +680,63 @@ async function runWellnessCheck() {
 // ── 5. Music playback ────────────────────────────────────────
 const musicQueues = new Map(); // guildId -> { songs, player, connection, volume, textChannel }
 
+const SPOTIFY_URL_RE = /open\.spotify\.com\/(?:intl-[a-z]+\/)?(track|album|playlist)\/([A-Za-z0-9]+)/i;
+
+function parseSpotifyUrl(str) {
+  const m = str.match(SPOTIFY_URL_RE);
+  return m ? { type: m[1], id: m[2] } : null;
+}
+
+// Normalizes the slightly-different shapes spotify-url-info returns for
+// getData() (single track) vs. getTracks() (playlist/album entries) into
+// one song object our queue understands. The actual playable URL isn't
+// resolved yet — that happens lazily in playNextInQueue so we don't burn
+// a YouTube search per track the moment a big playlist is queued.
+function spotifyTrackToSong(t, requestedBy) {
+  const name = t.name || t.title || 'Unknown Title';
+  const artist = Array.isArray(t.artists)
+    ? t.artists.map((a) => (typeof a === 'string' ? a : a.name)).filter(Boolean).join(', ')
+    : (t.artist || t.artists || 'Unknown Artist');
+  const thumbnail =
+    t.image ||
+    t.coverArt?.sources?.[0]?.url ||
+    t.album?.images?.[0]?.url ||
+    t.preview_image ||
+    null;
+
+  return {
+    title: `${name} — ${artist}`,
+    spotifyArtist: artist,
+    spotifyThumbnail: thumbnail,
+    searchQuery: `${name} ${artist} audio`,
+    resolved: false,
+    requestedBy,
+  };
+}
+
+// play-dl's `quality` option picks which audio format to request. Highest
+// quality (2) is preferred but occasionally the format YouTube hands back
+// for it fails mid-stream on cloud IPs; quality 0 (lowest/most compatible)
+// tends to succeed when that happens. Retrying across both plus a short
+// backoff absorbs most of the transient "bot detection" / rate-limit
+// failures that used to just skip the track outright.
+async function streamWithRetry(url, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    const quality = i === 0 ? 2 : 0;
+    try {
+      return await play.stream(url, { quality });
+    } catch (err) {
+      lastErr = err;
+      const msg = err?.message || '';
+      // Don't waste retries on failures a retry can't fix.
+      if (/private|unavailable|removed|copyright|age[- ]restrict/i.test(msg)) break;
+      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 async function playNextInQueue(guild) {
   const mq = musicQueues.get(guild.id);
   if (!mq) return;
@@ -683,7 +747,15 @@ async function playNextInQueue(guild) {
   }
   const song = mq.songs[0];
   try {
-    const streamInfo = await play.stream(song.url);
+    // Spotify-sourced entries don't have a YouTube URL yet — resolve it now.
+    if (!song.resolved) {
+      const results = await play.search(song.searchQuery || song.title, { limit: 1, source: { youtube: 'video' } });
+      if (!results.length) throw new Error('No matching YouTube audio found for this Spotify track.');
+      song.url = results[0].url;
+      song.resolved = true;
+    }
+
+    const streamInfo = await streamWithRetry(song.url);
     const resource = createAudioResource(streamInfo.stream, { inputType: streamInfo.type, inlineVolume: true });
     resource.volume.setVolume(mq.volume ?? 1);
     mq.player.play(resource);
@@ -691,7 +763,10 @@ async function playNextInQueue(guild) {
     console.error(`Music stream error for "${song.title}" (${song.url}):`, err);
     mq.songs.shift();
     const reason = err?.message ? err.message.slice(0, 300) : 'unknown error';
-    mq.textChannel?.send(`⚠️ Skipped **${song.title}** — failed to stream it.\n\`\`\`${reason}\`\`\``).catch(() => {});
+    const cookieHint = !process.env.YOUTUBE_COOKIE && /sign in|bot|429|403/i.test(reason)
+      ? '\n💡 Looks like YouTube bot-detection. Set `YOUTUBE_COOKIE` in your Railway env vars to fix this consistently.'
+      : '';
+    mq.textChannel?.send(`⚠️ Skipped **${song.title}** — failed to stream it after retries.\n\`\`\`${reason}\`\`\`${cookieHint}`).catch(() => {});
     return playNextInQueue(guild);
   }
 }
@@ -1506,25 +1581,63 @@ client.on('interactionCreate', async (interaction) => {
     if (!voiceChannel) return interaction.reply({ content: '❌ Join a voice channel first.', ephemeral: true });
     const query = interaction.options.getString('query');
     await interaction.deferReply();
+
     try {
-      let url, title;
-      if (play.yt_validate(query) === 'video') {
-        url = query;
-        const info = await play.video_basic_info(url);
-        title = info.video_details.title;
-      } else {
-        const results = await play.search(query, { limit: 1, source: { youtube: 'video' } });
-        if (!results.length) return interaction.editReply('❌ No results found.');
-        url = results[0].url;
-        title = results[0].title;
-      }
       const mq = getOrCreateQueue(interaction.guild, voiceChannel, interaction.channel);
-      mq.songs.push({ title, url, requestedBy: interaction.user.tag });
-      if (mq.songs.length === 1 && mq.player.state.status !== AudioPlayerStatus.Playing) {
-        await playNextInQueue(interaction.guild);
-        return interaction.editReply(`🎶 Now playing **${title}**`);
+      const spotify = parseSpotifyUrl(query);
+      let addedCount = 0;
+      let firstSong = null;
+
+      if (spotify) {
+        if (spotify.type === 'track') {
+          const data = await getSpotifyData(query);
+          const song = spotifyTrackToSong(data, interaction.user.tag);
+          mq.songs.push(song);
+          addedCount = 1;
+          firstSong = song;
+        } else {
+          // playlist or album — getTracks returns an array of track-like objects
+          const tracks = await getSpotifyTracks(query);
+          if (!tracks || !tracks.length) return interaction.editReply('❌ Could not read that Spotify playlist/album — make sure it\'s public.');
+          const songs = tracks.map((t) => spotifyTrackToSong(t, interaction.user.tag));
+          mq.songs.push(...songs);
+          addedCount = songs.length;
+          firstSong = songs[0];
+        }
+      } else {
+        let url, title;
+        if (play.yt_validate(query) === 'video') {
+          url = query;
+          const info = await play.video_basic_info(url);
+          title = info.video_details.title;
+        } else {
+          const results = await play.search(query, { limit: 1, source: { youtube: 'video' } });
+          if (!results.length) return interaction.editReply('❌ No results found.');
+          url = results[0].url;
+          title = results[0].title;
+        }
+        const song = { title, url, resolved: true, requestedBy: interaction.user.tag };
+        mq.songs.push(song);
+        addedCount = 1;
+        firstSong = song;
       }
-      return interaction.editReply(`➕ Added **${title}** to the queue (position ${mq.songs.length}).`);
+
+      const startedFresh = mq.songs.length === addedCount && mq.player.state.status !== AudioPlayerStatus.Playing;
+      if (startedFresh) await playNextInQueue(interaction.guild);
+
+      const embed = new EmbedBuilder()
+        .setColor(spotify ? '#1DB954' : '#5865f2')
+        .setDescription(
+          startedFresh
+            ? `🎶 Now playing **${firstSong.title}**${addedCount > 1 ? `\n➕ Queued **${addedCount - 1}** more track(s) from Spotify.` : ''}`
+            : addedCount > 1
+              ? `➕ Added **${addedCount}** tracks from Spotify to the queue.`
+              : `➕ Added **${firstSong.title}** to the queue (position ${mq.songs.length}).`
+        );
+      if (firstSong.spotifyThumbnail) embed.setThumbnail(firstSong.spotifyThumbnail);
+      if (spotify) embed.setFooter({ text: 'Playback sourced from YouTube audio (Spotify itself can\'t be streamed by bots).' });
+
+      return interaction.editReply({ embeds: [embed] });
     } catch (err) {
       console.error('/play error:', err);
       return interaction.editReply('❌ Could not play that. Try a different search or link.');
@@ -1566,7 +1679,7 @@ client.on('interactionCreate', async (interaction) => {
   if (cmd === 'queue') {
     const mq = musicQueues.get(interaction.guild.id);
     if (!mq || mq.songs.length === 0) return interaction.reply({ content: '📭 The queue is empty.', ephemeral: true });
-    const lines = mq.songs.slice(0, 10).map((s, i) => `${i === 0 ? '▶️' : `${i}.`} **${s.title}** — requested by ${s.requestedBy}`);
+    const lines = mq.songs.slice(0, 10).map((s, i) => `${i === 0 ? '▶️' : `${i}.`} **${s.title}**${s.resolved === false ? ' _(Spotify — resolves on play)_' : ''} — requested by ${s.requestedBy}`);
     const embed = new EmbedBuilder().setColor('#5865f2').setTitle('🎶 Music Queue').setDescription(lines.join('\n'));
     return interaction.reply({ embeds: [embed] });
   }
@@ -1574,7 +1687,11 @@ client.on('interactionCreate', async (interaction) => {
   if (cmd === 'nowplaying') {
     const mq = musicQueues.get(interaction.guild.id);
     if (!mq || mq.songs.length === 0) return interaction.reply({ content: '❌ Nothing is playing.', ephemeral: true });
-    return interaction.reply(`🎶 Now playing: **${mq.songs[0].title}** — requested by ${mq.songs[0].requestedBy}`);
+    const current = mq.songs[0];
+    const embed = new EmbedBuilder().setColor('#5865f2')
+      .setDescription(`🎶 Now playing: **${current.title}** — requested by ${current.requestedBy}`);
+    if (current.spotifyThumbnail) embed.setThumbnail(current.spotifyThumbnail);
+    return interaction.reply({ embeds: [embed] });
   }
 
   if (cmd === 'volume') {
