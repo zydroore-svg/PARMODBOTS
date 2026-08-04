@@ -74,7 +74,7 @@ const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 1
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
 // How long a user has to hit "I'm okay" before it counts as a failed check / strike.
 const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 1;
-const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 1 * 15;
+const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 1 * 1;
 
 console.log(`🩺 Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
 console.log(`🩺 Response window: ${WELLNESS_RESPONSE_MINUTES} min before a missed check counts as a strike`);
@@ -143,17 +143,7 @@ const SLASH_COMMANDS = [
     name: 'shift',
     description: 'Manage your on-duty shift',
     options: [
-      {
-        name: 'manage',
-        description: 'Start, pause, resume, or end your shift',
-        type: 2, // SUB_COMMAND_GROUP — renders as the "trident" nested menu in Discord
-        options: [
-          { name: 'start',  description: 'Start your shift (clock in / on duty)', type: 1 },
-          { name: 'pause',  description: 'Pause your current shift',              type: 1 },
-          { name: 'resume', description: 'Resume a paused shift',                 type: 1 },
-          { name: 'end',    description: 'End your shift (clock out)',            type: 1 },
-        ],
-      },
+      { name: 'manage', description: 'Open your shift management panel (start/pause/end via buttons)', type: 1 },
       { name: 'active', description: 'List everyone currently on shift', type: 1 },
       {
         name: 'leaderboard',
@@ -394,9 +384,9 @@ async function getActiveGuildShifts(guildId) {
 }
 
 // The `shifts` collection holds one LIVE doc per user, overwritten every
-// time they run /shift manage start — so it can't answer "who's worked the
-// most total time." Every completed shift gets archived here instead, which
-// is what the leaderboard reads from.
+// time they hit Start on the /shift manage panel — so it can't answer "who's
+// worked the most total time." Every completed shift gets archived here
+// instead, which is what the leaderboard reads from.
 async function logCompletedShift(guildId, userId, username, startedAt, endedAt, durationMs) {
   await db.collection('shiftHistory').add({
     guildId,
@@ -436,6 +426,104 @@ async function getShiftLeaderboard(guildId, period = 'all') {
   return [...totals.entries()]
     .map(([userId, v]) => ({ userId, ...v }))
     .sort((a, b) => b.totalMs - a.totalMs);
+}
+
+// All-time stats for a single user, used to populate the /shift manage panel.
+// Equality-only filters (no orderBy), same pattern as getWarnings — no
+// composite index required.
+async function getShiftStats(guildId, userId) {
+  const snap = await db.collection('shiftHistory')
+    .where('guildId', '==', guildId)
+    .where('userId', '==', userId)
+    .get();
+
+  let shiftCount = 0;
+  let totalMs = 0;
+  snap.forEach((doc) => {
+    const d = doc.data();
+    shiftCount += 1;
+    totalMs += d.durationMs || 0;
+  });
+
+  return { shiftCount, totalMs, avgMs: shiftCount ? totalMs / shiftCount : 0 };
+}
+
+// Builds the embed + button row for the /shift manage panel. Buttons are
+// disabled based on current status so there's nothing invalid to click:
+// Start is only enabled when off-shift, Pause/Resume + End only when on
+// shift. Called both when the panel is first opened and again after every
+// button press, to refresh the message in place.
+async function buildShiftPanel(guildId, userId, user) {
+  const [stats, liveShift] = await Promise.all([
+    getShiftStats(guildId, userId),
+    getShift(guildId, userId),
+  ]);
+
+  const now = Date.now();
+  let statusLabel = null;
+  let statusDot = '⚪';
+  let lastDurationMs = 0;
+
+  if (liveShift) {
+    const startedMs = liveShift.startedAt?.toDate?.().getTime() ?? now;
+    if (liveShift.status === 'active') {
+      statusLabel = 'Active';
+      statusDot = '🟢';
+      lastDurationMs = now - startedMs;
+    } else if (liveShift.status === 'paused') {
+      statusLabel = 'Paused';
+      statusDot = '🟡';
+      lastDurationMs = now - startedMs;
+    } else {
+      statusLabel = 'Ended';
+      statusDot = '⚫';
+      const endedMs = liveShift.endedAt?.toDate?.().getTime() ?? now;
+      lastDurationMs = endedMs - startedMs;
+    }
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor('#5865f2')
+    .setAuthor({ name: 'Shift Management', iconURL: user.displayAvatarURL() })
+    .addFields(
+      {
+        name: '📄 All Time Information',
+        value: `**Shift Count**: ${stats.shiftCount}\n**Total Duration**: ${formatDuration(stats.totalMs)}\n**Average Duration**: ${formatDuration(stats.avgMs)}`,
+      },
+      {
+        name: '🕐 Last Shift',
+        value: statusLabel
+          ? `**Status**: ${statusDot} ${statusLabel}\n**Total Time**: ${formatDuration(lastDurationMs)}\n\nShift Type: ON DUTY`
+          : 'No shifts recorded yet.',
+      },
+    )
+    .setTimestamp();
+
+  const onShift = liveShift?.status === 'active' || liveShift?.status === 'paused';
+  const isPaused = liveShift?.status === 'paused';
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`shift_start_${userId}`)
+      .setLabel('Start')
+      .setEmoji('▶️')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(onShift),
+    new ButtonBuilder()
+      .setCustomId(`shift_pauseresume_${userId}`)
+      .setLabel(isPaused ? 'Resume' : 'Pause')
+      .setEmoji('⏸️')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!onShift),
+    new ButtonBuilder()
+      .setCustomId(`shift_end_${userId}`)
+      .setLabel('End')
+      .setEmoji('⏹️')
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!onShift),
+  );
+
+  return { embeds: [embed], components: [row] };
 }
 
 // Issue a wellness-check strike — logged into the same `warnings` collection
@@ -663,6 +751,61 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (!interaction.isChatInputCommand()) {
+    // ── Shift management panel buttons ─────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('shift_')) {
+      const [, action, targetUserId] = interaction.customId.split('_');
+      if (interaction.user.id !== targetUserId) {
+        return interaction.reply({ content: "❌ This isn't your shift panel.", ephemeral: true });
+      }
+
+      const guildId = interaction.guild.id;
+      try {
+        const shift = await getShift(guildId, targetUserId);
+
+        if (action === 'start') {
+          if (shift && shift.status !== 'ended') {
+            return interaction.reply({ content: `❌ You're already on shift (status: **${shift.status.toUpperCase()}**).`, ephemeral: true });
+          }
+          await createShift(guildId, targetUserId, interaction.user.username);
+        } else if (action === 'pauseresume') {
+          if (!shift || shift.status === 'ended') {
+            return interaction.reply({ content: '❌ You are not currently on shift.', ephemeral: true });
+          }
+          if (shift.status === 'active') {
+            await updateShift(guildId, targetUserId, { status: 'paused', updatedAt: Timestamp.now() });
+          } else {
+            const now = Timestamp.now();
+            await updateShift(guildId, targetUserId, { status: 'active', activeSince: now, lastWellnessCheckAt: now, updatedAt: now });
+          }
+        } else if (action === 'end') {
+          if (!shift || shift.status === 'ended') {
+            return interaction.reply({ content: '❌ You are not currently on shift.', ephemeral: true });
+          }
+          const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
+          const endedAtTs = Timestamp.now();
+          const durationMs = Date.now() - startedMs;
+          await updateShift(guildId, targetUserId, {
+            status: 'ended',
+            endedAt: endedAtTs,
+            pendingCheckSentAt: null,
+            pendingCheckMessageId: null,
+            pendingCheckChannelId: null,
+            updatedAt: Timestamp.now(),
+          });
+          await logCompletedShift(guildId, targetUserId, interaction.user.username, shift.startedAt, endedAtTs, durationMs)
+            .catch((err) => console.error('Failed to archive completed shift for leaderboard:', err));
+        }
+
+        const panel = await buildShiftPanel(guildId, targetUserId, interaction.user);
+        await interaction.update(panel);
+        return sendModLog(interaction.guild, panel.embeds[0], interaction.channelId);
+      } catch (err) {
+        console.error('❌ Shift panel button error:', err);
+        const errMsg = `❌ Something went wrong: \`${err.message}\``;
+        return interaction.reply({ content: errMsg, ephemeral: true }).catch(() => {});
+      }
+    }
+
     // ── Wellness check acknowledge button ─────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('wellness_ack_')) {
       const targetId = interaction.customId.replace('wellness_ack_', '');
@@ -1062,74 +1205,15 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /shift ───────────────────────────────────────────────
   if (cmd === 'shift') {
-    // getSubcommand() returns the leaf subcommand name ('start', 'pause',
-    // 'resume', 'end', 'active', 'leaderboard') regardless of whether it's
-    // nested under the 'manage' subcommand group — no other logic below
-    // needs to change to support the grouping.
     const sub = interaction.options.getSubcommand();
     const guildId = interaction.guild.id;
     const userId = interaction.user.id;
 
     try {
-      if (sub === 'start') {
-        const existing = await getShift(guildId, userId);
-        if (existing && existing.status !== 'ended') {
-          return interaction.reply({ content: `❌ You're already on shift (status: **${existing.status.toUpperCase()}**). Use \`/shift manage end\` first.`, ephemeral: true });
-        }
-        await createShift(guildId, userId, interaction.user.username);
-        const embed = new EmbedBuilder().setColor('#57f287')
-          .setTitle('🟢 Shift Started')
-          .setDescription(`<@${userId}> is now **ON DUTY**. You'll get a wellness check-in every ${WELLNESS_CHECK_MINUTES} minutes while active — you'll have ${WELLNESS_RESPONSE_MINUTES} minutes to respond before a strike is issued.`)
-          .setTimestamp();
-        await interaction.reply({ embeds: [embed] });
-        return sendModLog(interaction.guild, embed, interaction.channelId);
-      }
-
-      if (sub === 'pause' || sub === 'resume' || sub === 'end') {
-        const shift = await getShift(guildId, userId);
-        if (!shift || shift.status === 'ended') {
-          return interaction.reply({ content: '❌ You are not currently on shift.', ephemeral: true });
-        }
-
-        if (sub === 'pause') {
-          if (shift.status === 'paused') return interaction.reply({ content: '⏸️ Your shift is already paused.', ephemeral: true });
-          await updateShift(guildId, userId, { status: 'paused', updatedAt: Timestamp.now() });
-          const embed = new EmbedBuilder().setColor('#fee75c').setDescription(`⏸️ <@${userId}>'s shift is now **PAUSED**. Wellness checks are paused too.`);
-          await interaction.reply({ embeds: [embed] });
-          return sendModLog(interaction.guild, embed, interaction.channelId);
-        }
-
-        if (sub === 'resume') {
-          if (shift.status === 'active') return interaction.reply({ content: '▶️ Your shift is already active.', ephemeral: true });
-          const now = Timestamp.now();
-          await updateShift(guildId, userId, { status: 'active', activeSince: now, lastWellnessCheckAt: now, updatedAt: now });
-          const embed = new EmbedBuilder().setColor('#57f287').setDescription(`▶️ <@${userId}>'s shift is **ACTIVE** again.`);
-          await interaction.reply({ embeds: [embed] });
-          return sendModLog(interaction.guild, embed, interaction.channelId);
-        }
-
-        if (sub === 'end') {
-          const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
-          const endedAtTs = Timestamp.now();
-          const durationMs = Date.now() - startedMs;
-          await updateShift(guildId, userId, {
-            status: 'ended',
-            endedAt: endedAtTs,
-            pendingCheckSentAt: null,
-            pendingCheckMessageId: null,
-            pendingCheckChannelId: null,
-            updatedAt: Timestamp.now(),
-          });
-          await logCompletedShift(guildId, userId, interaction.user.username, shift.startedAt, endedAtTs, durationMs)
-            .catch((err) => console.error('Failed to archive completed shift for leaderboard:', err));
-          const embed = new EmbedBuilder().setColor('#ed4245')
-            .setTitle('🔴 Shift Ended')
-            .setDescription(`<@${userId}> has clocked out.`)
-            .addFields({ name: '🕒 Total Duration', value: formatDuration(durationMs) })
-            .setTimestamp();
-          await interaction.reply({ embeds: [embed] });
-          return sendModLog(interaction.guild, embed, interaction.channelId);
-        }
+      if (sub === 'manage') {
+        await interaction.deferReply();
+        const panel = await buildShiftPanel(guildId, userId, interaction.user);
+        return interaction.editReply(panel);
       }
 
       if (sub === 'active') {
