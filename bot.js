@@ -73,7 +73,7 @@ const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) ||
 const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 300;
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
 // How long a user has to hit "I'm okay" before it counts as a failed check / strike.
-const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 2;
+const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 15;
 const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 60 * 1000;
 
 console.log(`🩺 Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
@@ -219,10 +219,15 @@ function requireStaff(interaction, perm = PermissionFlagsBits.ManageChannels) {
   return interaction.member.permissions.has(perm);
 }
 
-// Send an action to the mod log channel
-async function sendModLog(guild, embed) {
+// Send an action to the mod log channel. Pass the interaction's channel ID
+// as `skipChannelId` so we don't double-post when staff run a command
+// directly in the log channel — otherwise the reply and the log entry are
+// the same embed landing in the same channel back to back.
+async function sendModLog(guild, embed, skipChannelId = null) {
   const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
-  if (logChannel) await logChannel.send({ embeds: [embed] }).catch(console.error);
+  if (!logChannel) return;
+  if (skipChannelId && logChannel.id === skipChannelId) return;
+  await logChannel.send({ embeds: [embed] }).catch(console.error);
 }
 
 // ── Interaction dedup lock ──────────────────────────────────────
@@ -752,7 +757,7 @@ client.on('interactionCreate', async (interaction) => {
       ).setTimestamp();
 
     await interaction.editReply({ embeds: [embed] });
-    await sendModLog(interaction.guild, embed);
+    await sendModLog(interaction.guild, embed, interaction.channelId);
 
     try {
       const dmEmbed = new EmbedBuilder().setColor('#fee75c')
@@ -845,7 +850,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '📜 Reason',  value: reason },
         ).setTimestamp();
       await interaction.editReply({ embeds: [embed] });
-      await sendModLog(interaction.guild, embed);
+      await sendModLog(interaction.guild, embed, interaction.channelId);
       try { await target.send(`👢 You have been kicked from **${interaction.guild.name}**.\nReason: ${reason}`); } catch { /**/ }
     } catch (err) {
       console.error('/kick:', err);
@@ -874,7 +879,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '📜 Reason',       value: reason },
         ).setTimestamp();
       await interaction.editReply({ embeds: [embed] });
-      await sendModLog(interaction.guild, embed);
+      await sendModLog(interaction.guild, embed, interaction.channelId);
     } catch (err) {
       console.error('/ban:', err);
       return interaction.editReply('❌ Failed to ban. Check my permissions and role position.');
@@ -900,7 +905,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '📜 Reason',  value: reason },
         ).setTimestamp();
       await interaction.editReply({ embeds: [embed] });
-      await sendModLog(interaction.guild, embed);
+      await sendModLog(interaction.guild, embed, interaction.channelId);
     } catch (err) {
       console.error('/unban:', err);
       return interaction.editReply('❌ Could not find that ban or failed to unban.');
@@ -928,7 +933,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '📜 Reason',    value: reason },
         ).setTimestamp();
       await interaction.editReply({ embeds: [embed] });
-      await sendModLog(interaction.guild, embed);
+      await sendModLog(interaction.guild, embed, interaction.channelId);
       try { await target.send(`⏱️ You have been timed out in **${interaction.guild.name}** for ${minutes} minute(s).\nReason: ${reason}`); } catch { /**/ }
     } catch (err) {
       console.error('/timeout:', err);
@@ -950,7 +955,7 @@ client.on('interactionCreate', async (interaction) => {
         .addFields({ name: '👤 User', value: `${target.tag}`, inline: true }, { name: '👮 By', value: interaction.user.tag, inline: true })
         .setTimestamp();
       await interaction.editReply({ embeds: [embed] });
-      await sendModLog(interaction.guild, embed);
+      await sendModLog(interaction.guild, embed, interaction.channelId);
     } catch (err) {
       console.error('/untimeout:', err);
       return interaction.editReply('❌ Failed to remove timeout.');
@@ -994,7 +999,7 @@ client.on('interactionCreate', async (interaction) => {
           .setDescription(`<@${userId}> is now **ON DUTY**. You'll get a wellness check-in every ${WELLNESS_CHECK_MINUTES} minutes while active — you'll have ${WELLNESS_RESPONSE_MINUTES} minutes to respond before a strike is issued.`)
           .setTimestamp();
         await interaction.reply({ embeds: [embed] });
-        return sendModLog(interaction.guild, embed);
+        return sendModLog(interaction.guild, embed, interaction.channelId);
       }
 
       if (sub === 'pause' || sub === 'resume' || sub === 'end') {
@@ -1008,7 +1013,7 @@ client.on('interactionCreate', async (interaction) => {
           await updateShift(guildId, userId, { status: 'paused', updatedAt: Timestamp.now() });
           const embed = new EmbedBuilder().setColor('#fee75c').setDescription(`⏸️ <@${userId}>'s shift is now **PAUSED**. Wellness checks are paused too.`);
           await interaction.reply({ embeds: [embed] });
-          return sendModLog(interaction.guild, embed);
+          return sendModLog(interaction.guild, embed, interaction.channelId);
         }
 
         if (sub === 'resume') {
@@ -1017,7 +1022,7 @@ client.on('interactionCreate', async (interaction) => {
           await updateShift(guildId, userId, { status: 'active', activeSince: now, lastWellnessCheckAt: now, updatedAt: now });
           const embed = new EmbedBuilder().setColor('#57f287').setDescription(`▶️ <@${userId}>'s shift is **ACTIVE** again.`);
           await interaction.reply({ embeds: [embed] });
-          return sendModLog(interaction.guild, embed);
+          return sendModLog(interaction.guild, embed, interaction.channelId);
         }
 
         if (sub === 'end') {
@@ -1036,7 +1041,7 @@ client.on('interactionCreate', async (interaction) => {
             .addFields({ name: '🕒 Total Duration', value: formatDuration(Date.now() - startedMs) })
             .setTimestamp();
           await interaction.reply({ embeds: [embed] });
-          return sendModLog(interaction.guild, embed);
+          return sendModLog(interaction.guild, embed, interaction.channelId);
         }
       }
 
