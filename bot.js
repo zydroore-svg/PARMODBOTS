@@ -1007,6 +1007,8 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guild.id;
       const userId = interaction.user.id;
 
+      try {
+
       if (sub === 'start') {
         const existing = await getShift(guildId, userId);
         if (existing && existing.status !== 'ended') {
@@ -1076,6 +1078,15 @@ client.on('interactionCreate', async (interaction) => {
           .setDescription(lines.join('\n'))
           .setTimestamp();
         return interaction.editReply({ embeds: [embed] });
+      }
+
+      } catch (err) {
+        console.error('❌ /shift error:', err);
+        const errMsg = `❌ Something went wrong running \`/shift ${sub}\`: \`${err.message}\``;
+        if (interaction.deferred || interaction.replied) {
+          return interaction.editReply(errMsg).catch(() => {});
+        }
+        return interaction.reply({ content: errMsg, ephemeral: true }).catch(() => {});
       }
     }
 
