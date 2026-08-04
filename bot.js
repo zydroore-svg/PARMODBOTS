@@ -3,7 +3,7 @@
 //  Run with:  node bot.js
 // ─────────────────────────────────────────────────────────────
 import express from 'express';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'fs';
 import path from 'path';
 import 'dotenv/config';
 
@@ -75,11 +75,32 @@ if (process.env.YOUTUBE_COOKIE) {
 const YTDLP_BIN_DIR = path.join(process.cwd(), '.bin');
 const YTDLP_BIN_PATH = path.join(YTDLP_BIN_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
 
+// yt-dlp ships two relevant Linux release assets: "yt-dlp" (a Python
+// zipapp that needs `python3` on PATH to run) and "yt-dlp_linux" (a
+// self-contained PyInstaller binary with no Python dependency at all).
+// yt-dlp-wrap's own downloadFromGithub() was pulling down the
+// python3-dependent variant on this host, which then crashed with
+// "python3: No such file or directory" since Railway's Node image
+// doesn't include Python. Fetching the standalone binary directly here
+// sidesteps that entirely — no Python needed either way.
 async function ensureYtDlpBinary() {
   if (existsSync(YTDLP_BIN_PATH)) return;
   console.log('⬇️  Downloading yt-dlp binary (first boot only)...');
   if (!existsSync(YTDLP_BIN_DIR)) mkdirSync(YTDLP_BIN_DIR, { recursive: true });
-  await YTDlpWrap.downloadFromGithub(YTDLP_BIN_PATH);
+
+  const assetName = process.platform === 'win32'
+    ? 'yt-dlp.exe'
+    : process.platform === 'darwin'
+      ? 'yt-dlp_macos'
+      : 'yt-dlp_linux';
+  const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${assetName}`;
+
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`Failed to download yt-dlp binary: HTTP ${res.status} from ${url}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  writeFileSync(YTDLP_BIN_PATH, buf);
+  if (process.platform !== 'win32') chmodSync(YTDLP_BIN_PATH, 0o755);
+
   console.log('✅ yt-dlp binary ready');
 }
 
