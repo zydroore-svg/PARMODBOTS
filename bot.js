@@ -40,6 +40,7 @@ const {
   LOG_CHANNEL_ID,
   FIREBASE_SERVICE_ACCOUNT_JSON,
   FIREBASE_SERVICE_ACCOUNT_PATH,
+  FIREBASE_SERVICE_ACCOUNT_BASE64,
   PORT,
 } = process.env;
 
@@ -69,12 +70,17 @@ process.on('uncaughtException', (err) => { console.error('❌ Uncaught exception
 // authenticates with a service account and is meant for server use.
 let serviceAccount;
 try {
-  if (FIREBASE_SERVICE_ACCOUNT_JSON) {
+  if (FIREBASE_SERVICE_ACCOUNT_BASE64) {
+    // Preferred on env-var-only hosts (Railway, Render, etc.) — base64 has no
+    // quotes/newlines/backslashes for the platform's variable editor to mangle.
+    const decoded = Buffer.from(FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf-8');
+    serviceAccount = JSON.parse(decoded);
+  } else if (FIREBASE_SERVICE_ACCOUNT_JSON) {
     serviceAccount = JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON);
   } else if (FIREBASE_SERVICE_ACCOUNT_PATH) {
     serviceAccount = JSON.parse(readFileSync(FIREBASE_SERVICE_ACCOUNT_PATH, 'utf-8'));
   } else {
-    throw new Error('Set FIREBASE_SERVICE_ACCOUNT_JSON (stringified JSON) or FIREBASE_SERVICE_ACCOUNT_PATH (path to the key file) in your .env.');
+    throw new Error('Set FIREBASE_SERVICE_ACCOUNT_BASE64 (recommended on Railway), FIREBASE_SERVICE_ACCOUNT_JSON (stringified JSON), or FIREBASE_SERVICE_ACCOUNT_PATH (path to the key file) in your .env.');
   }
 } catch (err) {
   console.error('❌ Firebase service account error:', err.message);
