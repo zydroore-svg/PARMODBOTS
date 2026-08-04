@@ -10,14 +10,9 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@discordjs/voice": "^0.17.0",
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
-    "ffmpeg-static": "^5.2.0",
-    "firebase-admin": "^12.6.0",
-    "play-dl": "^1.9.7",
-    "spotify-url-info": "^3.3.1",
-    "yt-dlp-wrap": "^2.3.12"
+    "firebase-admin": "^12.6.0"
   }
 }
