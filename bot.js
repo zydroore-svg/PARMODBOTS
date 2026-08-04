@@ -33,7 +33,7 @@ const {
 const REQUIRED = { DISCORD_BOT_TOKEN, GUILD_ID, LOG_CHANNEL_ID };
 const missing = Object.entries(REQUIRED).filter(([, v]) => !v).map(([k]) => k);
 if (missing.length) {
-  console.error('❌ Missing required environment variables:', missing.join(', '));
+  console.error('Missing required environment variables:', missing.join(', '));
   process.exit(1);
 }
 
@@ -46,11 +46,11 @@ const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
 const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 1;
 const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 1 * 1;
 
-console.log(`🩺 Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
-console.log(`🩺 Response window: ${WELLNESS_RESPONSE_MINUTES} min before a missed check counts as a strike`);
+console.log(`Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
+console.log(`Response window: ${WELLNESS_RESPONSE_MINUTES} min before a missed check counts as a strike`);
 
-process.on('unhandledRejection', (reason) => console.error('❌ Unhandled promise rejection:', reason));
-process.on('uncaughtException', (err) => { console.error('❌ Uncaught exception:', err); process.exit(1); });
+process.on('unhandledRejection', (reason) => console.error('Unhandled promise rejection:', reason));
+process.on('uncaughtException', (err) => { console.error('Uncaught exception:', err); process.exit(1); });
 
 // ── 2. Firebase (Admin SDK — bypasses Firestore security rules) ─
 // IMPORTANT: the previous version used the *client* `firebase` package
@@ -73,8 +73,8 @@ try {
     throw new Error('Set FIREBASE_SERVICE_ACCOUNT_BASE64 (recommended on Railway), FIREBASE_SERVICE_ACCOUNT_JSON (stringified JSON), or FIREBASE_SERVICE_ACCOUNT_PATH (path to the key file) in your .env.');
   }
 } catch (err) {
-  console.error('❌ Firebase service account error:', err.message);
-  console.error('   Generate one in Firebase Console → Project Settings → Service Accounts → Generate new private key.');
+  console.error('Firebase service account error:', err.message);
+  console.error('   Generate one in Firebase Console -> Project Settings -> Service Accounts -> Generate new private key.');
   process.exit(1);
 }
 
@@ -94,6 +94,19 @@ const client = new Client({
   ],
 });
 
+// ── Brand palette ────────────────────────────────────────────
+// Centralized so every embed in the bot shares one consistent, professional
+// look instead of a different ad-hoc hex code per command.
+const COLORS = {
+  primary: 0x2B2D42,   // neutral slate — default/informational
+  success: 0x2E7D32,   // muted green — approvals, completions
+  warning: 0xB8860B,   // muted gold — warnings, cautions
+  danger: 0x8B1E2A,    // muted red — bans, kicks, failures
+  info: 0x34495E,      // blue-grey — reference/lookup commands
+};
+
+const BRAND_FOOTER = 'PAR Staff Management';
+
 // ── Slash command definitions ─────────────────────────────────
 const SLASH_COMMANDS = [
   // ── Moderation ──
@@ -102,18 +115,38 @@ const SLASH_COMMANDS = [
   { name: 'clearwarn', description: 'Delete a specific warning by its ID',   options: [{ name: 'id',   description: 'Warning document ID', type: 3, required: true }] },
   { name: 'modlogs',   description: 'Full moderation history for a user',    options: [{ name: 'user', description: 'User to look up', type: 6, required: true }] },
   { name: 'kick',      description: 'Kick a member from the server',         options: [{ name: 'user', description: 'User to kick', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
-  { name: 'ban',       description: 'Ban a user and log it to Firebase',     options: [{ name: 'user', description: 'User to ban', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: true }, { name: 'days', description: 'Messages to delete (days, 0–7)', type: 4, required: false, min_value: 0, max_value: 7 }] },
+  { name: 'ban',       description: 'Ban a user and log it to Firebase',     options: [{ name: 'user', description: 'User to ban', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: true }, { name: 'days', description: 'Messages to delete (days, 0-7)', type: 4, required: false, min_value: 0, max_value: 7 }] },
   { name: 'unban',     description: 'Unban a user by their Discord ID',      options: [{ name: 'userid', description: 'Discord user ID', type: 3, required: true }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
   { name: 'timeout',   description: 'Timeout a user for a set duration',     options: [{ name: 'user', description: 'User to timeout', type: 6, required: true }, { name: 'minutes', description: 'Duration in minutes', type: 4, required: true, min_value: 1, max_value: 40320 }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
   { name: 'untimeout', description: 'Remove a timeout from a user',          options: [{ name: 'user', description: 'User to untimeout', type: 6, required: true }] },
-  { name: 'purge',     description: 'Bulk-delete messages from this channel', options: [{ name: 'amount', description: 'Number of messages (1–100)', type: 4, required: true, min_value: 1, max_value: 100 }, { name: 'user', description: 'Only delete messages from this user (optional)', type: 6, required: false }] },
+  { name: 'purge',     description: 'Bulk-delete messages from this channel', options: [{ name: 'amount', description: 'Number of messages (1-100)', type: 4, required: true, min_value: 1, max_value: 100 }, { name: 'user', description: 'Only delete messages from this user (optional)', type: 6, required: false }] },
 
   // ── Shift management & wellness ──
   {
     name: 'shift',
-    description: 'Manage your on-duty shift',
+    description: 'Manage staff on-duty shifts',
     options: [
       { name: 'manage', description: 'Open your shift management panel (start/pause/end via buttons)', type: 1 },
+      {
+        name: 'admin',
+        description: 'Manage another staff member\'s shift on their behalf',
+        type: 1,
+        options: [
+          { name: 'user', description: 'Staff member to manage', type: 6, required: true },
+          {
+            name: 'action',
+            description: 'Action to take',
+            type: 3,
+            required: true,
+            choices: [
+              { name: 'Start',  value: 'start' },
+              { name: 'Pause',  value: 'pause' },
+              { name: 'Resume', value: 'resume' },
+              { name: 'End',    value: 'end' },
+            ],
+          },
+        ],
+      },
       { name: 'active', description: 'List everyone currently on shift', type: 1 },
       {
         name: 'leaderboard',
@@ -130,6 +163,25 @@ const SLASH_COMMANDS = [
             { name: 'All Time',   value: 'all' },
           ],
         }],
+      },
+      {
+        name: 'wipe',
+        description: 'Permanently clear recorded shift data (e.g. for a weekly quota reset)',
+        type: 1,
+        options: [
+          {
+            name: 'scope',
+            description: 'What to wipe',
+            type: 3,
+            required: true,
+            choices: [
+              { name: 'Leaderboard history (completed shifts)', value: 'history' },
+              { name: 'Everyone\'s live shift status',          value: 'live' },
+              { name: 'Both',                                   value: 'all' },
+            ],
+          },
+          { name: 'confirm', description: 'Type CONFIRM to proceed', type: 3, required: true },
+        ],
       },
     ],
   },
@@ -165,7 +217,7 @@ const SLASH_COMMANDS = [
 ];
 
 client.once('ready', async () => {
-  console.log(`🤖 Bot ready as ${client.user.tag}`);
+  console.log(`Bot ready as ${client.user.tag}`);
   try {
     // Wipe any GLOBAL commands from a previous deploy first. If commands
     // were ever registered globally (client.application.commands.set) in
@@ -176,23 +228,23 @@ client.once('ready', async () => {
     // for global ones), so we forcibly clear global commands on every boot
     // to guarantee stragglers can't linger or come back.
     await client.application.commands.set([]);
-    console.log('🧹 Cleared global slash commands (guild commands are authoritative)');
+    console.log('Cleared global slash commands (guild commands are authoritative)');
 
     // Guild-scoped registration updates instantly (global commands can take
     // up to an hour to propagate, which is the usual reason "new" or
     // "changed" commands don't show up right away).
     const guild = await client.guilds.fetch(GUILD_ID);
     await guild.commands.set(SLASH_COMMANDS);
-    console.log(`✅ ${SLASH_COMMANDS.length} slash commands registered to guild ${GUILD_ID}`);
+    console.log(`${SLASH_COMMANDS.length} slash commands registered to guild ${GUILD_ID}`);
   } catch (err) {
-    console.error('❌ Failed to register slash commands:', err);
+    console.error('Failed to register slash commands:', err);
   }
   setInterval(runWellnessCheck, WELLNESS_POLL_MS);
   runWellnessCheck(); // run one pass immediately on boot
 });
 
 client.login(DISCORD_BOT_TOKEN).catch((err) => {
-  console.error('❌ Discord login failed:', err.message);
+  console.error('Discord login failed:', err.message);
   process.exit(1);
 });
 
@@ -407,6 +459,30 @@ async function getShiftStats(guildId, userId) {
   return { shiftCount, totalMs, avgMs: shiftCount ? totalMs / shiftCount : 0 };
 }
 
+// Deletes every document in a Firestore collection matching `guildId`, in
+// batches of 400 (comfortably under Firestore's 500-write batch limit).
+// Used by /shift wipe to reset either the live-shift board or the
+// completed-shift history that the leaderboard is built from.
+async function wipeCollectionForGuild(collectionName, guildId) {
+  const snap = await db.collection(collectionName).where('guildId', '==', guildId).get();
+  let deleted = 0;
+  let batch = db.batch();
+  let opsInBatch = 0;
+
+  for (const doc of snap.docs) {
+    batch.delete(doc.ref);
+    opsInBatch += 1;
+    deleted += 1;
+    if (opsInBatch === 400) {
+      await batch.commit();
+      batch = db.batch();
+      opsInBatch = 0;
+    }
+  }
+  if (opsInBatch > 0) await batch.commit();
+  return deleted;
+}
+
 // Builds the embed + button row for the /shift manage panel. Buttons are
 // disabled based on current status so there's nothing invalid to click:
 // Start is only enabled when off-shift, Pause/Resume + End only when on
@@ -420,42 +496,43 @@ async function buildShiftPanel(guildId, userId, user) {
 
   const now = Date.now();
   let statusLabel = null;
-  let statusDot = '⚪';
+  let statusDot = '\u25CB';
   let lastDurationMs = 0;
 
   if (liveShift) {
     const startedMs = liveShift.startedAt?.toDate?.().getTime() ?? now;
     if (liveShift.status === 'active') {
       statusLabel = 'Active';
-      statusDot = '🟢';
+      statusDot = '\u25CF';
       lastDurationMs = now - startedMs;
     } else if (liveShift.status === 'paused') {
       statusLabel = 'Paused';
-      statusDot = '🟡';
+      statusDot = '\u25D0';
       lastDurationMs = now - startedMs;
     } else {
       statusLabel = 'Ended';
-      statusDot = '⚫';
+      statusDot = '\u25CB';
       const endedMs = liveShift.endedAt?.toDate?.().getTime() ?? now;
       lastDurationMs = endedMs - startedMs;
     }
   }
 
   const embed = new EmbedBuilder()
-    .setColor('#5865f2')
+    .setColor(COLORS.primary)
     .setAuthor({ name: 'Shift Management', iconURL: user.displayAvatarURL() })
     .addFields(
       {
-        name: '📄 All Time Information',
-        value: `**Shift Count**: ${stats.shiftCount}\n**Total Duration**: ${formatDuration(stats.totalMs)}\n**Average Duration**: ${formatDuration(stats.avgMs)}`,
+        name: 'All-Time Summary',
+        value: `Shift Count: **${stats.shiftCount}**\nTotal Duration: **${formatDuration(stats.totalMs)}**\nAverage Duration: **${formatDuration(stats.avgMs)}**`,
       },
       {
-        name: '🕐 Last Shift',
+        name: 'Current Shift',
         value: statusLabel
-          ? `**Status**: ${statusDot} ${statusLabel}\n**Total Time**: ${formatDuration(lastDurationMs)}\n\nShift Type: ON DUTY`
+          ? `Status: **${statusDot} ${statusLabel}**\nElapsed: **${formatDuration(lastDurationMs)}**\nType: On Duty`
           : 'No shifts recorded yet.',
       },
     )
+    .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
 
   const onShift = liveShift?.status === 'active' || liveShift?.status === 'paused';
@@ -465,19 +542,16 @@ async function buildShiftPanel(guildId, userId, user) {
     new ButtonBuilder()
       .setCustomId(`shift_start_${userId}`)
       .setLabel('Start')
-      .setEmoji('▶️')
       .setStyle(ButtonStyle.Success)
       .setDisabled(onShift),
     new ButtonBuilder()
       .setCustomId(`shift_pauseresume_${userId}`)
       .setLabel(isPaused ? 'Resume' : 'Pause')
-      .setEmoji('⏸️')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(!onShift),
     new ButtonBuilder()
       .setCustomId(`shift_end_${userId}`)
       .setLabel('End')
-      .setEmoji('⏹️')
       .setStyle(ButtonStyle.Danger)
       .setDisabled(!onShift),
   );
@@ -507,24 +581,23 @@ async function sendWellnessCheck(channel, shift, now) {
   const startedMs = shift.startedAt?.toDate?.().getTime() ?? now;
 
   const embed = new EmbedBuilder()
-    .setColor('#faa61a')
-    .setTitle('🩺 Wellness Check')
+    .setColor(COLORS.warning)
+    .setTitle('Wellness Check')
     .setDescription(
-      `Hey <@${shift.userId}>, you've been on duty for a while — just checking in on you!\n\n` +
-      `You have **${WELLNESS_RESPONSE_MINUTES} minutes** to acknowledge this or you'll receive a strike.`
+      `Hi <@${shift.userId}>, you've been on duty for a while — just checking in.\n\n` +
+      `You have **${WELLNESS_RESPONSE_MINUTES} minute(s)** to acknowledge this before it counts as a strike.`
     )
     .addFields(
-      { name: '🕒 On Shift For', value: formatDuration(now - startedMs), inline: true },
-      { name: '📋 Status',       value: 'ON DUTY',                      inline: true },
+      { name: 'On Shift For', value: formatDuration(now - startedMs), inline: true },
+      { name: 'Status',       value: 'On Duty',                       inline: true },
     )
-    .setFooter({ text: "Tap the button below to let us know you're okay." })
+    .setFooter({ text: 'Select the button below to confirm you are okay.' })
     .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`wellness_ack_${shift.userId}`)
       .setLabel("I'm okay")
-      .setEmoji('✅')
       .setStyle(ButtonStyle.Success)
   );
 
@@ -572,18 +645,19 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
       const oldMsg = oldChannel && await oldChannel.messages.fetch(shift.pendingCheckMessageId).catch(() => null);
       if (oldMsg && oldMsg.embeds[0]) {
         const failedEmbed = EmbedBuilder.from(oldMsg.embeds[0])
-          .setColor('#ed4245')
-          .setFooter({ text: '❌ No response — strike issued' });
+          .setColor(COLORS.danger)
+          .setFooter({ text: 'No response received — strike issued' });
         await oldMsg.edit({ embeds: [failedEmbed], components: [] }).catch(() => {});
       }
     } catch { /* best effort */ }
   }
 
   const failEmbed = new EmbedBuilder()
-    .setColor('#ed4245')
-    .setTitle('❌ Wellness Check Failed')
-    .setDescription(`<@${shift.userId}> did not respond to their wellness check within ${WELLNESS_RESPONSE_MINUTES} minutes.`)
-    .addFields({ name: '⚠️ Strike Count', value: `${newStrikeCount}`, inline: true })
+    .setColor(COLORS.danger)
+    .setTitle('Wellness Check Failed')
+    .setDescription(`<@${shift.userId}> did not respond to their wellness check within ${WELLNESS_RESPONSE_MINUTES} minute(s).`)
+    .addFields({ name: 'Strike Count', value: `${newStrikeCount}`, inline: true })
+    .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
 
   await fallbackChannel.send({ embeds: [failEmbed] }).catch((err) => console.error('Failed to post strike notice:', err));
@@ -632,7 +706,59 @@ async function runWellnessCheck() {
 // ── 6. Minimal Express server (health check for hosting platforms) ──
 const app = express();
 app.get('/', (req, res) => res.json({ status: 'ok', bot: client.user?.tag ?? 'starting' }));
-app.listen(PORT || 3001, '0.0.0.0', () => console.log(`🌐 Health check listening on port ${PORT || 3001}`));
+app.listen(PORT || 3001, '0.0.0.0', () => console.log(`Health check listening on port ${PORT || 3001}`));
+
+// ── Shared shift-transition logic ───────────────────────────────
+// Powers both the /shift manage buttons and /shift admin, so the two paths
+// can't drift apart. Returns { ok: true } or { ok: false, message }.
+async function applyShiftAction(guildId, targetUserId, targetUsername, action) {
+  const shift = await getShift(guildId, targetUserId);
+
+  if (action === 'start') {
+    if (shift && shift.status !== 'ended') {
+      return { ok: false, message: `Already on shift (status: **${shift.status.toUpperCase()}**).` };
+    }
+    await createShift(guildId, targetUserId, targetUsername);
+    return { ok: true };
+  }
+
+  if (action === 'pause' || action === 'resume') {
+    if (!shift || shift.status === 'ended') {
+      return { ok: false, message: 'Not currently on shift.' };
+    }
+    if (action === 'pause') {
+      if (shift.status === 'paused') return { ok: false, message: 'Shift is already paused.' };
+      await updateShift(guildId, targetUserId, { status: 'paused', updatedAt: Timestamp.now() });
+    } else {
+      if (shift.status === 'active') return { ok: false, message: 'Shift is already active.' };
+      const now = Timestamp.now();
+      await updateShift(guildId, targetUserId, { status: 'active', activeSince: now, lastWellnessCheckAt: now, updatedAt: now });
+    }
+    return { ok: true };
+  }
+
+  if (action === 'end') {
+    if (!shift || shift.status === 'ended') {
+      return { ok: false, message: 'Not currently on shift.' };
+    }
+    const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
+    const endedAtTs = Timestamp.now();
+    const durationMs = Date.now() - startedMs;
+    await updateShift(guildId, targetUserId, {
+      status: 'ended',
+      endedAt: endedAtTs,
+      pendingCheckSentAt: null,
+      pendingCheckMessageId: null,
+      pendingCheckChannelId: null,
+      updatedAt: Timestamp.now(),
+    });
+    await logCompletedShift(guildId, targetUserId, targetUsername, shift.startedAt, endedAtTs, durationMs)
+      .catch((err) => console.error('Failed to archive completed shift for leaderboard:', err));
+    return { ok: true };
+  }
+
+  return { ok: false, message: 'Unrecognized action.' };
+}
 
 // ── 7. Interaction handler ────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
@@ -640,7 +766,7 @@ client.on('interactionCreate', async (interaction) => {
   // interaction, stop here so we never send a duplicate reply.
   const claimed = await claimInteraction(interaction);
   if (!claimed) {
-    console.warn(`⚠️ Duplicate interaction ${interaction.id} ignored — another bot instance already handled it. If you keep seeing this, check for a second running process.`);
+    console.warn(`Duplicate interaction ${interaction.id} ignored — another bot instance already handled it. If you keep seeing this, check for a second running process.`);
     return;
   }
 
@@ -649,53 +775,31 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton() && interaction.customId.startsWith('shift_')) {
       const [, action, targetUserId] = interaction.customId.split('_');
       if (interaction.user.id !== targetUserId) {
-        return interaction.reply({ content: "❌ This isn't your shift panel.", ephemeral: true });
+        return interaction.reply({ content: "This isn't your shift panel.", ephemeral: true });
       }
 
       const guildId = interaction.guild.id;
       try {
-        const shift = await getShift(guildId, targetUserId);
+        const mapped = action === 'pauseresume' ? null : action; // resolved below
+        let result;
+        if (action === 'pauseresume') {
+          const shift = await getShift(guildId, targetUserId);
+          const nextAction = shift?.status === 'active' ? 'pause' : 'resume';
+          result = await applyShiftAction(guildId, targetUserId, interaction.user.username, nextAction);
+        } else {
+          result = await applyShiftAction(guildId, targetUserId, interaction.user.username, action);
+        }
 
-        if (action === 'start') {
-          if (shift && shift.status !== 'ended') {
-            return interaction.reply({ content: `❌ You're already on shift (status: **${shift.status.toUpperCase()}**).`, ephemeral: true });
-          }
-          await createShift(guildId, targetUserId, interaction.user.username);
-        } else if (action === 'pauseresume') {
-          if (!shift || shift.status === 'ended') {
-            return interaction.reply({ content: '❌ You are not currently on shift.', ephemeral: true });
-          }
-          if (shift.status === 'active') {
-            await updateShift(guildId, targetUserId, { status: 'paused', updatedAt: Timestamp.now() });
-          } else {
-            const now = Timestamp.now();
-            await updateShift(guildId, targetUserId, { status: 'active', activeSince: now, lastWellnessCheckAt: now, updatedAt: now });
-          }
-        } else if (action === 'end') {
-          if (!shift || shift.status === 'ended') {
-            return interaction.reply({ content: '❌ You are not currently on shift.', ephemeral: true });
-          }
-          const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
-          const endedAtTs = Timestamp.now();
-          const durationMs = Date.now() - startedMs;
-          await updateShift(guildId, targetUserId, {
-            status: 'ended',
-            endedAt: endedAtTs,
-            pendingCheckSentAt: null,
-            pendingCheckMessageId: null,
-            pendingCheckChannelId: null,
-            updatedAt: Timestamp.now(),
-          });
-          await logCompletedShift(guildId, targetUserId, interaction.user.username, shift.startedAt, endedAtTs, durationMs)
-            .catch((err) => console.error('Failed to archive completed shift for leaderboard:', err));
+        if (!result.ok) {
+          return interaction.reply({ content: result.message, ephemeral: true });
         }
 
         const panel = await buildShiftPanel(guildId, targetUserId, interaction.user);
         await interaction.update(panel);
         return sendModLog(interaction.guild, panel.embeds[0], interaction.channelId);
       } catch (err) {
-        console.error('❌ Shift panel button error:', err);
-        const errMsg = `❌ Something went wrong: \`${err.message}\``;
+        console.error('Shift panel button error:', err);
+        const errMsg = `Something went wrong: \`${err.message}\``;
         return interaction.reply({ content: errMsg, ephemeral: true }).catch(() => {});
       }
     }
@@ -704,12 +808,12 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton() && interaction.customId.startsWith('wellness_ack_')) {
       const targetId = interaction.customId.replace('wellness_ack_', '');
       if (interaction.user.id !== targetId) {
-        return interaction.reply({ content: "❌ This check-in isn't for you.", ephemeral: true });
+        return interaction.reply({ content: "This check-in isn't for you.", ephemeral: true });
       }
       const original = interaction.message.embeds[0];
       const embed = EmbedBuilder.from(original)
-        .setColor('#57f287')
-        .setFooter({ text: `✅ Acknowledged by ${interaction.user.tag}` });
+        .setColor(COLORS.success)
+        .setFooter({ text: `Acknowledged by ${interaction.user.tag}` });
 
       // Clear the pending-check state so the poller stops counting toward a strike.
       try {
@@ -733,8 +837,8 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /ping ────────────────────────────────────────────────
   if (cmd === 'ping') {
-    const sent = await interaction.reply({ content: '🏓 Pinging...', fetchReply: true });
-    return interaction.editReply(`🏓 **Pong!**\nBot latency: **${sent.createdTimestamp - interaction.createdTimestamp}ms** | API: **${Math.round(client.ws.ping)}ms**`);
+    const sent = await interaction.reply({ content: 'Pinging...', fetchReply: true });
+    return interaction.editReply(`**Pong.**\nBot latency: **${sent.createdTimestamp - interaction.createdTimestamp}ms** · API: **${Math.round(client.ws.ping)}ms**`);
   }
 
   // ── /botinfo ─────────────────────────────────────────────
@@ -742,19 +846,21 @@ client.on('interactionCreate', async (interaction) => {
     const uptime = process.uptime();
     const h = Math.floor(uptime / 3600), m = Math.floor((uptime % 3600) / 60), s = Math.floor(uptime % 60);
     const mem = process.memoryUsage();
-    const embed = new EmbedBuilder().setColor('#5865f2')
-      .setTitle(`🤖 ${client.user.username} — Bot Info`)
+    const embed = new EmbedBuilder().setColor(COLORS.primary)
+      .setTitle(`${client.user.username} — Bot Info`)
       .setThumbnail(client.user.displayAvatarURL())
       .addFields(
-        { name: '⏱️ Uptime',       value: `${h}h ${m}m ${s}s`,                         inline: true },
-        { name: '📡 API Latency',  value: `${Math.round(client.ws.ping)}ms`,             inline: true },
-        { name: '💾 Memory',       value: `${Math.round(mem.heapUsed / 1024 / 1024)}MB`, inline: true },
-        { name: '🏠 Servers',      value: `${client.guilds.cache.size}`,                 inline: true },
-        { name: '👥 Members',      value: `${client.guilds.cache.reduce((a, g) => a + g.memberCount, 0)}`, inline: true },
-        { name: '⚙️ Commands',     value: `${SLASH_COMMANDS.length}`,                   inline: true },
-        { name: '📦 Node.js',      value: process.version,                              inline: true },
-        { name: '🔧 discord.js',   value: 'v14',                                        inline: true },
-      ).setTimestamp();
+        { name: 'Uptime',       value: `${h}h ${m}m ${s}s`,                         inline: true },
+        { name: 'API Latency',  value: `${Math.round(client.ws.ping)}ms`,             inline: true },
+        { name: 'Memory',       value: `${Math.round(mem.heapUsed / 1024 / 1024)}MB`, inline: true },
+        { name: 'Servers',      value: `${client.guilds.cache.size}`,                 inline: true },
+        { name: 'Members',      value: `${client.guilds.cache.reduce((a, g) => a + g.memberCount, 0)}`, inline: true },
+        { name: 'Commands',     value: `${SLASH_COMMANDS.length}`,                   inline: true },
+        { name: 'Node.js',      value: process.version,                              inline: true },
+        { name: 'discord.js',   value: 'v14',                                        inline: true },
+      )
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
@@ -764,18 +870,20 @@ client.on('interactionCreate', async (interaction) => {
     let member;
     try { member = await interaction.guild.members.fetch(target.id); } catch { /**/ }
     const warns = await getWarnings(target.id, interaction.guild.id);
-    const embed = new EmbedBuilder().setColor('#5865f2')
-      .setTitle(`👤 ${target.username}`)
+    const embed = new EmbedBuilder().setColor(COLORS.info)
+      .setTitle(target.username)
       .setThumbnail(target.displayAvatarURL({ size: 256 }))
       .addFields(
-        { name: 'Tag',           value: target.tag,                                                                  inline: true },
-        { name: 'ID',            value: target.id,                                                                   inline: true },
-        { name: 'Bot?',          value: target.bot ? 'Yes' : 'No',                                                  inline: true },
-        { name: 'Account Created', value: `<t:${Math.floor(target.createdTimestamp / 1000)}:R>`,                    inline: true },
-        { name: 'Joined Server',   value: member ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'N/A',   inline: true },
-        { name: '⚠️ Warnings',   value: `${warns.length}`,                                                          inline: true },
-        { name: 'Roles',         value: member ? (member.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None') : 'N/A' },
-      ).setTimestamp();
+        { name: 'Tag',              value: target.tag,                                                                  inline: true },
+        { name: 'ID',               value: target.id,                                                                   inline: true },
+        { name: 'Bot',              value: target.bot ? 'Yes' : 'No',                                                  inline: true },
+        { name: 'Account Created',  value: `<t:${Math.floor(target.createdTimestamp / 1000)}:R>`,                    inline: true },
+        { name: 'Joined Server',    value: member ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'N/A',   inline: true },
+        { name: 'Warnings',         value: `${warns.length}`,                                                          inline: true },
+        { name: 'Roles',            value: member ? (member.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None') : 'N/A' },
+      )
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
@@ -783,19 +891,21 @@ client.on('interactionCreate', async (interaction) => {
   if (cmd === 'serverinfo') {
     const g = interaction.guild;
     await g.fetch();
-    const embed = new EmbedBuilder().setColor('#ffd700')
-      .setTitle(`🏠 ${g.name}`)
+    const embed = new EmbedBuilder().setColor(COLORS.primary)
+      .setTitle(g.name)
       .setThumbnail(g.iconURL({ size: 256 }))
       .addFields(
-        { name: 'Owner',       value: `<@${g.ownerId}>`,                                                  inline: true },
-        { name: 'ID',          value: g.id,                                                               inline: true },
-        { name: 'Created',     value: `<t:${Math.floor(g.createdTimestamp / 1000)}:R>`,                  inline: true },
-        { name: 'Members',     value: `${g.memberCount}`,                                                inline: true },
-        { name: 'Channels',    value: `${g.channels.cache.size}`,                                        inline: true },
-        { name: 'Roles',       value: `${g.roles.cache.size}`,                                           inline: true },
-        { name: 'Boost Level', value: `Level ${g.premiumTier} (${g.premiumSubscriptionCount} boosts)`,  inline: true },
+        { name: 'Owner',        value: `<@${g.ownerId}>`,                                                  inline: true },
+        { name: 'ID',           value: g.id,                                                               inline: true },
+        { name: 'Created',      value: `<t:${Math.floor(g.createdTimestamp / 1000)}:R>`,                  inline: true },
+        { name: 'Members',      value: `${g.memberCount}`,                                                inline: true },
+        { name: 'Channels',     value: `${g.channels.cache.size}`,                                        inline: true },
+        { name: 'Roles',        value: `${g.roles.cache.size}`,                                           inline: true },
+        { name: 'Boost Level',  value: `Level ${g.premiumTier} (${g.premiumSubscriptionCount} boosts)`,  inline: true },
         { name: 'Verification', value: ['None','Low','Medium','High','Very High'][g.verificationLevel],  inline: true },
-      ).setTimestamp();
+      )
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
     return interaction.reply({ embeds: [embed] });
   }
 
@@ -803,18 +913,20 @@ client.on('interactionCreate', async (interaction) => {
   if (cmd === 'roleinfo') {
     const role = interaction.options.getRole('role');
     const perms = role.permissions.toArray().slice(0, 10).map(p => `\`${p}\``).join(', ') || 'None';
-    const embed = new EmbedBuilder().setColor(role.hexColor || '#5865f2')
-      .setTitle(`🎭 ${role.name}`)
+    const embed = new EmbedBuilder().setColor(role.color || COLORS.primary)
+      .setTitle(role.name)
       .addFields(
-        { name: 'ID',         value: role.id,                                                       inline: true },
-        { name: 'Color',      value: role.hexColor,                                                 inline: true },
-        { name: 'Position',   value: `${role.position}`,                                           inline: true },
-        { name: 'Members',    value: `${role.members.size}`,                                       inline: true },
-        { name: 'Mentionable', value: role.mentionable ? 'Yes' : 'No',                            inline: true },
-        { name: 'Hoisted',    value: role.hoist ? 'Yes' : 'No',                                   inline: true },
-        { name: 'Created',    value: `<t:${Math.floor(role.createdTimestamp / 1000)}:R>`,          inline: true },
+        { name: 'ID',              value: role.id,                                                       inline: true },
+        { name: 'Color',           value: role.hexColor,                                                 inline: true },
+        { name: 'Position',        value: `${role.position}`,                                           inline: true },
+        { name: 'Members',         value: `${role.members.size}`,                                       inline: true },
+        { name: 'Mentionable',     value: role.mentionable ? 'Yes' : 'No',                            inline: true },
+        { name: 'Hoisted',         value: role.hoist ? 'Yes' : 'No',                                   inline: true },
+        { name: 'Created',         value: `<t:${Math.floor(role.createdTimestamp / 1000)}:R>`,          inline: true },
         { name: 'Key Permissions', value: perms },
-      ).setTimestamp();
+      )
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
@@ -822,63 +934,68 @@ client.on('interactionCreate', async (interaction) => {
   if (cmd === 'avatar') {
     const target = interaction.options.getUser('user') || interaction.user;
     const url = target.displayAvatarURL({ size: 1024, extension: 'png' });
-    const embed = new EmbedBuilder().setColor('#5865f2')
-      .setTitle(`🖼️ ${target.username}'s Avatar`)
+    const embed = new EmbedBuilder().setColor(COLORS.primary)
+      .setTitle(`${target.username} — Avatar`)
       .setImage(url)
-      .setDescription(`[Open full size](${url})`);
+      .setDescription(`[Open full size](${url})`)
+      .setFooter({ text: BRAND_FOOTER });
     return interaction.reply({ embeds: [embed] });
   }
 
   // ── /membercount ─────────────────────────────────────────
   if (cmd === 'membercount') {
-    return interaction.reply(`👥 **${interaction.guild.name}** has **${interaction.guild.memberCount}** members.`);
+    return interaction.reply(`**${interaction.guild.name}** has **${interaction.guild.memberCount}** members.`);
   }
 
   // ── /stats ───────────────────────────────────────────────
   if (cmd === 'stats') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
     const warnSnap = await db.collection('warnings').get();
     const activeShifts = await getActiveGuildShifts(interaction.guild.id);
-    const embed = new EmbedBuilder().setColor('#5865f2')
-      .setTitle('📊 PAR Bot Stats')
+    const embed = new EmbedBuilder().setColor(COLORS.primary)
+      .setTitle('PAR Bot Stats')
       .addFields(
-        { name: '⚠️ Total Warnings', value: `${warnSnap.size}`, inline: true },
-        { name: '🕒 Staff On Shift', value: `${activeShifts.length}`, inline: true },
-        { name: '🏠 Server Members', value: `${interaction.guild.memberCount}`, inline: true },
-        { name: '⚙️ Commands',       value: `${SLASH_COMMANDS.length}`, inline: true },
-        { name: '📡 API Latency',    value: `${Math.round(client.ws.ping)}ms`, inline: true },
-      ).setTimestamp();
+        { name: 'Total Warnings',  value: `${warnSnap.size}`, inline: true },
+        { name: 'Staff On Shift',  value: `${activeShifts.length}`, inline: true },
+        { name: 'Server Members',  value: `${interaction.guild.memberCount}`, inline: true },
+        { name: 'Commands',        value: `${SLASH_COMMANDS.length}`, inline: true },
+        { name: 'API Latency',     value: `${Math.round(client.ws.ping)}ms`, inline: true },
+      )
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
     return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /warn ────────────────────────────────────────────────
   if (cmd === 'warn') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const target = interaction.options.getUser('user');
     const reason = interaction.options.getString('reason');
     await interaction.deferReply();
     const warnId = await addWarning(target, interaction.user, reason, interaction.guild.id);
     const allWarns = await getWarnings(target.id, interaction.guild.id);
 
-    const embed = new EmbedBuilder().setColor('#fee75c')
-      .setTitle('⚠️ Warning Issued')
+    const embed = new EmbedBuilder().setColor(COLORS.warning)
+      .setTitle('Warning Issued')
       .setThumbnail(target.displayAvatarURL())
       .addFields(
-        { name: '👤 User',      value: `<@${target.id}> (${target.tag})`, inline: true },
-        { name: '👮 By',        value: `<@${interaction.user.id}>`,       inline: true },
-        { name: '📋 Total Warns', value: `${allWarns.length}`,            inline: true },
-        { name: '📜 Reason',    value: reason },
-        { name: '🆔 Warning ID', value: `\`${warnId}\`` },
-      ).setTimestamp();
+        { name: 'User',       value: `<@${target.id}> (${target.tag})`, inline: true },
+        { name: 'Issued By',  value: `<@${interaction.user.id}>`,       inline: true },
+        { name: 'Total Warns', value: `${allWarns.length}`,             inline: true },
+        { name: 'Reason',     value: reason },
+        { name: 'Warning ID', value: `\`${warnId}\`` },
+      )
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
 
     await interaction.editReply({ embeds: [embed] });
     await sendModLog(interaction.guild, embed, interaction.channelId);
 
     try {
-      const dmEmbed = new EmbedBuilder().setColor('#fee75c')
-        .setTitle(`⚠️ You have been warned in ${interaction.guild.name}`)
-        .addFields({ name: '📜 Reason', value: reason }, { name: '📋 Total Warnings', value: `${allWarns.length}` })
+      const dmEmbed = new EmbedBuilder().setColor(COLORS.warning)
+        .setTitle(`You have been warned in ${interaction.guild.name}`)
+        .addFields({ name: 'Reason', value: reason }, { name: 'Total Warnings', value: `${allWarns.length}` })
         .setTimestamp();
       await target.send({ embeds: [dmEmbed] });
     } catch { /**/ }
@@ -886,63 +1003,63 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /warnings ────────────────────────────────────────────
   if (cmd === 'warnings') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const target = interaction.options.getUser('user');
     await interaction.deferReply({ ephemeral: true });
     const warns = await getWarnings(target.id, interaction.guild.id);
-    if (warns.length === 0) return interaction.editReply(`✅ **${target.tag}** has no warnings.`);
+    if (warns.length === 0) return interaction.editReply(`**${target.tag}** has no warnings.`);
 
     const fields = warns.slice(0, 10).map((w, i) => {
       const ts = w.createdAt?.toDate ? Math.floor(w.createdAt.toDate().getTime() / 1000) : 0;
-      const tag = w.type === 'wellness_strike' ? ' 🩺' : '';
-      return { name: `#${i + 1}${tag} — ID: \`${w.id}\``, value: `**Reason:** ${w.reason}\n**By:** ${w.moderatorTag}\n**When:** ${ts ? `<t:${ts}:R>` : 'Unknown'}` };
+      const tag = w.type === 'wellness_strike' ? ' (wellness)' : '';
+      return { name: `#${i + 1}${tag} — ID: \`${w.id}\``, value: `Reason: ${w.reason}\nBy: ${w.moderatorTag}\nWhen: ${ts ? `<t:${ts}:R>` : 'Unknown'}` };
     });
 
-    const embed = new EmbedBuilder().setColor('#fee75c')
-      .setTitle(`⚠️ Warnings for ${target.tag}`)
+    const embed = new EmbedBuilder().setColor(COLORS.warning)
+      .setTitle(`Warnings — ${target.tag}`)
       .setDescription(`Total: **${warns.length}**`)
       .addFields(fields)
-      .setFooter({ text: warns.length > 10 ? `Showing 10 of ${warns.length}` : '' })
+      .setFooter({ text: warns.length > 10 ? `Showing 10 of ${warns.length} · ${BRAND_FOOTER}` : BRAND_FOOTER })
       .setTimestamp();
     return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /clearwarn ───────────────────────────────────────────
   if (cmd === 'clearwarn') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const warnId = interaction.options.getString('id');
     await interaction.deferReply({ ephemeral: true });
     try {
       const ref = db.collection('warnings').doc(warnId);
       const snap = await ref.get();
-      if (!snap.exists) return interaction.editReply('❌ Warning ID not found.');
+      if (!snap.exists) return interaction.editReply('Warning ID not found.');
       await ref.delete();
-      return interaction.editReply(`✅ Warning \`${warnId}\` deleted.`);
+      return interaction.editReply(`Warning \`${warnId}\` deleted.`);
     } catch (err) {
       console.error('/clearwarn:', err);
-      return interaction.editReply('❌ Failed to delete warning.');
+      return interaction.editReply('Failed to delete warning.');
     }
   }
 
   // ── /modlogs ─────────────────────────────────────────────
   if (cmd === 'modlogs') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const target = interaction.options.getUser('user');
     await interaction.deferReply({ ephemeral: true });
     const [logs, warns] = await Promise.all([getModLogs(target.id), getWarnings(target.id, interaction.guild.id)]);
-    if (logs.length === 0 && warns.length === 0) return interaction.editReply(`✅ **${target.tag}** has a clean record.`);
+    if (logs.length === 0 && warns.length === 0) return interaction.editReply(`**${target.tag}** has a clean record.`);
 
     const logFields = logs.slice(0, 8).map((l) => {
       const ts = l.createdAt?.toDate ? Math.floor(l.createdAt.toDate().getTime() / 1000) : 0;
-      const icon = { ban: '🔨', kick: '👢', timeout: '⏱️', unban: '✅', untimeout: '✅' }[l.type] || '📋';
-      return { name: `${icon} ${l.type.toUpperCase()} ${ts ? `— <t:${ts}:R>` : ''}`, value: `**Reason:** ${l.reason}\n**By:** ${l.moderatorTag}` };
+      return { name: `${l.type.toUpperCase()} ${ts ? `— <t:${ts}:R>` : ''}`, value: `Reason: ${l.reason}\nBy: ${l.moderatorTag}` };
     });
 
-    const embed = new EmbedBuilder().setColor('#ed4245')
-      .setTitle(`📋 Mod History — ${target.tag}`)
+    const embed = new EmbedBuilder().setColor(COLORS.danger)
+      .setTitle(`Moderation History — ${target.tag}`)
       .setThumbnail(target.displayAvatarURL())
-      .setDescription(`**${warns.length}** warning(s) • **${logs.length}** action(s)`)
+      .setDescription(`**${warns.length}** warning(s) · **${logs.length}** action(s)`)
       .addFields(logFields.length ? logFields : [{ name: 'Actions', value: 'None on record' }])
+      .setFooter({ text: BRAND_FOOTER })
       .setTimestamp();
     return interaction.editReply({ embeds: [embed] });
   }
@@ -950,7 +1067,7 @@ client.on('interactionCreate', async (interaction) => {
   // ── /kick ────────────────────────────────────────────────
   if (cmd === 'kick') {
     if (!requireStaff(interaction, PermissionFlagsBits.KickMembers))
-      return interaction.reply({ content: '❌ You need Kick Members permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Kick Members permission.', ephemeral: true });
     const target = interaction.options.getUser('user');
     const reason = interaction.options.getString('reason') || 'No reason given';
     await interaction.deferReply();
@@ -958,54 +1075,58 @@ client.on('interactionCreate', async (interaction) => {
       const member = await interaction.guild.members.fetch(target.id);
       await member.kick(reason);
       await logModAction('kick', target, interaction.user, reason);
-      const embed = new EmbedBuilder().setColor('#ed4245')
-        .setTitle('👢 Member Kicked')
+      const embed = new EmbedBuilder().setColor(COLORS.danger)
+        .setTitle('Member Kicked')
         .addFields(
-          { name: '👤 User',    value: `${target.tag}`, inline: true },
-          { name: '👮 By',      value: interaction.user.tag, inline: true },
-          { name: '📜 Reason',  value: reason },
-        ).setTimestamp();
+          { name: 'User',   value: `${target.tag}`, inline: true },
+          { name: 'By',     value: interaction.user.tag, inline: true },
+          { name: 'Reason', value: reason },
+        )
+        .setFooter({ text: BRAND_FOOTER })
+        .setTimestamp();
       await interaction.editReply({ embeds: [embed] });
       await sendModLog(interaction.guild, embed, interaction.channelId);
-      try { await target.send(`👢 You have been kicked from **${interaction.guild.name}**.\nReason: ${reason}`); } catch { /**/ }
+      try { await target.send(`You have been kicked from **${interaction.guild.name}**.\nReason: ${reason}`); } catch { /**/ }
     } catch (err) {
       console.error('/kick:', err);
-      return interaction.editReply('❌ Failed to kick. Check my permissions and role position.');
+      return interaction.editReply('Failed to kick. Check my permissions and role position.');
     }
   }
 
   // ── /ban ─────────────────────────────────────────────────
   if (cmd === 'ban') {
     if (!requireStaff(interaction, PermissionFlagsBits.BanMembers))
-      return interaction.reply({ content: '❌ You need Ban Members permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Ban Members permission.', ephemeral: true });
     const target = interaction.options.getUser('user');
     const reason = interaction.options.getString('reason');
     const days = interaction.options.getInteger('days') ?? 0;
     await interaction.deferReply();
     try {
-      try { await target.send(`🔨 You have been banned from **${interaction.guild.name}**.\nReason: ${reason}`); } catch { /**/ }
+      try { await target.send(`You have been banned from **${interaction.guild.name}**.\nReason: ${reason}`); } catch { /**/ }
       await interaction.guild.members.ban(target.id, { reason, deleteMessageDays: days });
       await logModAction('ban', target, interaction.user, reason, { deleteMessageDays: days });
-      const embed = new EmbedBuilder().setColor('#ed4245')
-        .setTitle('🔨 Member Banned')
+      const embed = new EmbedBuilder().setColor(COLORS.danger)
+        .setTitle('Member Banned')
         .addFields(
-          { name: '👤 User',         value: `${target.tag} (${target.id})`, inline: true },
-          { name: '👮 By',           value: interaction.user.tag,           inline: true },
-          { name: '🗑️ Msgs Deleted', value: `${days} day(s)`,              inline: true },
-          { name: '📜 Reason',       value: reason },
-        ).setTimestamp();
+          { name: 'User',           value: `${target.tag} (${target.id})`, inline: true },
+          { name: 'By',             value: interaction.user.tag,           inline: true },
+          { name: 'Messages Deleted', value: `${days} day(s)`,              inline: true },
+          { name: 'Reason',         value: reason },
+        )
+        .setFooter({ text: BRAND_FOOTER })
+        .setTimestamp();
       await interaction.editReply({ embeds: [embed] });
       await sendModLog(interaction.guild, embed, interaction.channelId);
     } catch (err) {
       console.error('/ban:', err);
-      return interaction.editReply('❌ Failed to ban. Check my permissions and role position.');
+      return interaction.editReply('Failed to ban. Check my permissions and role position.');
     }
   }
 
   // ── /unban ───────────────────────────────────────────────
   if (cmd === 'unban') {
     if (!requireStaff(interaction, PermissionFlagsBits.BanMembers))
-      return interaction.reply({ content: '❌ You need Ban Members permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Ban Members permission.', ephemeral: true });
     const userId = interaction.options.getString('userid');
     const reason = interaction.options.getString('reason') || 'No reason given';
     await interaction.deferReply();
@@ -1013,25 +1134,27 @@ client.on('interactionCreate', async (interaction) => {
       const ban = await interaction.guild.bans.fetch(userId);
       await interaction.guild.members.unban(userId, reason);
       await logModAction('unban', { id: userId, tag: ban.user.tag }, interaction.user, reason);
-      const embed = new EmbedBuilder().setColor('#57f287')
-        .setTitle('✅ Member Unbanned')
+      const embed = new EmbedBuilder().setColor(COLORS.success)
+        .setTitle('Member Unbanned')
         .addFields(
-          { name: '👤 User',    value: `${ban.user.tag} (${userId})`, inline: true },
-          { name: '👮 By',      value: interaction.user.tag,          inline: true },
-          { name: '📜 Reason',  value: reason },
-        ).setTimestamp();
+          { name: 'User',   value: `${ban.user.tag} (${userId})`, inline: true },
+          { name: 'By',     value: interaction.user.tag,          inline: true },
+          { name: 'Reason', value: reason },
+        )
+        .setFooter({ text: BRAND_FOOTER })
+        .setTimestamp();
       await interaction.editReply({ embeds: [embed] });
       await sendModLog(interaction.guild, embed, interaction.channelId);
     } catch (err) {
       console.error('/unban:', err);
-      return interaction.editReply('❌ Could not find that ban or failed to unban.');
+      return interaction.editReply('Could not find that ban or failed to unban.');
     }
   }
 
   // ── /timeout ─────────────────────────────────────────────
   if (cmd === 'timeout') {
     if (!requireStaff(interaction, PermissionFlagsBits.ModerateMembers))
-      return interaction.reply({ content: '❌ You need Moderate Members permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Moderate Members permission.', ephemeral: true });
     const target = interaction.options.getUser('user');
     const minutes = interaction.options.getInteger('minutes');
     const reason = interaction.options.getString('reason') || 'No reason given';
@@ -1040,48 +1163,51 @@ client.on('interactionCreate', async (interaction) => {
       const member = await interaction.guild.members.fetch(target.id);
       await member.timeout(minutes * 60 * 1000, reason);
       await logModAction('timeout', target, interaction.user, reason, { durationMinutes: minutes });
-      const embed = new EmbedBuilder().setColor('#f57c00')
-        .setTitle('⏱️ Member Timed Out')
+      const embed = new EmbedBuilder().setColor(COLORS.warning)
+        .setTitle('Member Timed Out')
         .addFields(
-          { name: '👤 User',      value: `${target.tag}`,     inline: true },
-          { name: '⏱️ Duration',  value: `${minutes} min(s)`, inline: true },
-          { name: '👮 By',        value: interaction.user.tag, inline: true },
-          { name: '📜 Reason',    value: reason },
-        ).setTimestamp();
+          { name: 'User',     value: `${target.tag}`,     inline: true },
+          { name: 'Duration', value: `${minutes} min(s)`, inline: true },
+          { name: 'By',       value: interaction.user.tag, inline: true },
+          { name: 'Reason',   value: reason },
+        )
+        .setFooter({ text: BRAND_FOOTER })
+        .setTimestamp();
       await interaction.editReply({ embeds: [embed] });
       await sendModLog(interaction.guild, embed, interaction.channelId);
-      try { await target.send(`⏱️ You have been timed out in **${interaction.guild.name}** for ${minutes} minute(s).\nReason: ${reason}`); } catch { /**/ }
+      try { await target.send(`You have been timed out in **${interaction.guild.name}** for ${minutes} minute(s).\nReason: ${reason}`); } catch { /**/ }
     } catch (err) {
       console.error('/timeout:', err);
-      return interaction.editReply('❌ Failed to timeout. Check permissions.');
+      return interaction.editReply('Failed to timeout. Check permissions.');
     }
   }
 
   // ── /untimeout ───────────────────────────────────────────
   if (cmd === 'untimeout') {
     if (!requireStaff(interaction, PermissionFlagsBits.ModerateMembers))
-      return interaction.reply({ content: '❌ You need Moderate Members permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Moderate Members permission.', ephemeral: true });
     const target = interaction.options.getUser('user');
     await interaction.deferReply();
     try {
       const member = await interaction.guild.members.fetch(target.id);
       await member.timeout(null);
-      const embed = new EmbedBuilder().setColor('#57f287')
-        .setTitle('✅ Timeout Removed')
-        .addFields({ name: '👤 User', value: `${target.tag}`, inline: true }, { name: '👮 By', value: interaction.user.tag, inline: true })
+      const embed = new EmbedBuilder().setColor(COLORS.success)
+        .setTitle('Timeout Removed')
+        .addFields({ name: 'User', value: `${target.tag}`, inline: true }, { name: 'By', value: interaction.user.tag, inline: true })
+        .setFooter({ text: BRAND_FOOTER })
         .setTimestamp();
       await interaction.editReply({ embeds: [embed] });
       await sendModLog(interaction.guild, embed, interaction.channelId);
     } catch (err) {
       console.error('/untimeout:', err);
-      return interaction.editReply('❌ Failed to remove timeout.');
+      return interaction.editReply('Failed to remove timeout.');
     }
   }
 
   // ── /purge ───────────────────────────────────────────────
   if (cmd === 'purge') {
     if (!requireStaff(interaction, PermissionFlagsBits.ManageMessages))
-      return interaction.reply({ content: '❌ You need Manage Messages permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Manage Messages permission.', ephemeral: true });
     const amount = interaction.options.getInteger('amount');
     const filterUser = interaction.options.getUser('user');
     await interaction.deferReply({ ephemeral: true });
@@ -1090,10 +1216,10 @@ client.on('interactionCreate', async (interaction) => {
       if (filterUser) messages = messages.filter(m => m.author.id === filterUser.id);
       const toDelete = [...messages.values()].slice(0, amount);
       const deleted = await interaction.channel.bulkDelete(toDelete, true);
-      return interaction.editReply(`🗑️ Deleted **${deleted.size}** message(s)${filterUser ? ` from ${filterUser.tag}` : ''}.`);
+      return interaction.editReply(`Deleted **${deleted.size}** message(s)${filterUser ? ` from ${filterUser.tag}` : ''}.`);
     } catch (err) {
       console.error('/purge:', err);
-      return interaction.editReply('❌ Failed to delete messages. Messages older than 14 days cannot be bulk-deleted.');
+      return interaction.editReply('Failed to delete messages. Messages older than 14 days cannot be bulk-deleted.');
     }
   }
 
@@ -1110,24 +1236,48 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.editReply(panel);
       }
 
+      if (sub === 'admin') {
+        if (!requireStaff(interaction, PermissionFlagsBits.ManageChannels))
+          return interaction.reply({ content: 'You need staff permissions to manage another member\'s shift.', ephemeral: true });
+
+        const target = interaction.options.getUser('user');
+        const action = interaction.options.getString('action');
+        await interaction.deferReply();
+
+        const result = await applyShiftAction(guildId, target.id, target.username, action);
+        if (!result.ok) return interaction.editReply(result.message);
+
+        const embed = new EmbedBuilder().setColor(COLORS.primary)
+          .setTitle('Shift Updated by Staff')
+          .addFields(
+            { name: 'Staff Member', value: `<@${target.id}>`, inline: true },
+            { name: 'Action',       value: action.charAt(0).toUpperCase() + action.slice(1), inline: true },
+            { name: 'Updated By',   value: `<@${interaction.user.id}>`, inline: true },
+          )
+          .setFooter({ text: BRAND_FOOTER })
+          .setTimestamp();
+        await interaction.editReply({ embeds: [embed] });
+        return sendModLog(interaction.guild, embed, interaction.channelId);
+      }
+
       if (sub === 'active') {
         await interaction.deferReply();
         const shifts = await getActiveGuildShifts(guildId);
-        if (shifts.length === 0) return interaction.editReply('📭 No one is currently on shift.');
+        if (shifts.length === 0) return interaction.editReply('No one is currently on shift.');
 
         const now = Date.now();
         const lines = shifts
           .sort((a, b) => (a.startedAt?.toDate?.().getTime() ?? 0) - (b.startedAt?.toDate?.().getTime() ?? 0))
           .map((s, i) => {
             const started = s.startedAt?.toDate?.().getTime() ?? now;
-            const statusIcon = s.status === 'active' ? '🟢' : '⏸️';
-            const strikeTag = s.strikes ? ` — ⚠️ ${s.strikes} strike(s)` : '';
-            return `${i + 1}. ${statusIcon} <@${s.userId}> — ${formatDuration(now - started)} (${s.status.toUpperCase()})${strikeTag}`;
+            const strikeTag = s.strikes ? ` — ${s.strikes} strike(s)` : '';
+            return `${i + 1}. <@${s.userId}> — ${formatDuration(now - started)} (${s.status.toUpperCase()})${strikeTag}`;
           });
 
-        const embed = new EmbedBuilder().setColor('#5865f2')
-          .setTitle('🕒 Active Shifts')
+        const embed = new EmbedBuilder().setColor(COLORS.primary)
+          .setTitle('Active Shifts')
           .setDescription(lines.join('\n'))
+          .setFooter({ text: BRAND_FOOTER })
           .setTimestamp();
         return interaction.editReply({ embeds: [embed] });
       }
@@ -1136,25 +1286,59 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply();
         const period = interaction.options.getString('period') || 'all';
         const board = await getShiftLeaderboard(guildId, period);
-        if (board.length === 0) return interaction.editReply('📭 No completed shifts recorded yet for that period.');
+        if (board.length === 0) return interaction.editReply('No completed shifts recorded yet for that period.');
 
-        const medals = ['🥇', '🥈', '🥉'];
         const lines = board.slice(0, 10).map((entry, i) => {
-          const rank = medals[i] || `**${i + 1}.**`;
-          return `${rank} <@${entry.userId}> — **${formatDuration(entry.totalMs)}** (${entry.shiftCount} shift${entry.shiftCount === 1 ? '' : 's'})`;
+          return `**${i + 1}.** <@${entry.userId}> — **${formatDuration(entry.totalMs)}** (${entry.shiftCount} shift${entry.shiftCount === 1 ? '' : 's'})`;
         });
 
         const periodLabel = period === 'week' ? 'This Week' : period === 'month' ? 'This Month' : 'All Time';
-        const embed = new EmbedBuilder().setColor('#ffd700')
-          .setTitle(`🏆 Shift Leaderboard — ${periodLabel}`)
+        const embed = new EmbedBuilder().setColor(COLORS.primary)
+          .setTitle(`Shift Leaderboard — ${periodLabel}`)
           .setDescription(lines.join('\n'))
-          .setFooter({ text: `Showing top ${Math.min(board.length, 10)} of ${board.length}` })
+          .setFooter({ text: `Showing top ${Math.min(board.length, 10)} of ${board.length} · ${BRAND_FOOTER}` })
           .setTimestamp();
         return interaction.editReply({ embeds: [embed] });
       }
+
+      if (sub === 'wipe') {
+        if (!requireStaff(interaction, PermissionFlagsBits.Administrator))
+          return interaction.reply({ content: 'Administrators only — this permanently deletes shift data.', ephemeral: true });
+
+        const scope = interaction.options.getString('scope');
+        const confirm = interaction.options.getString('confirm');
+        if (confirm !== 'CONFIRM') {
+          return interaction.reply({ content: 'Not confirmed. Re-run the command with `confirm` set to exactly `CONFIRM` to proceed.', ephemeral: true });
+        }
+
+        await interaction.deferReply();
+        let historyDeleted = 0;
+        let liveDeleted = 0;
+
+        if (scope === 'history' || scope === 'all') {
+          historyDeleted = await wipeCollectionForGuild('shiftHistory', guildId);
+        }
+        if (scope === 'live' || scope === 'all') {
+          liveDeleted = await wipeCollectionForGuild('shifts', guildId);
+        }
+
+        const scopeLabel = scope === 'history' ? 'Leaderboard history' : scope === 'live' ? 'Live shift status' : 'Leaderboard history and live shift status';
+        const embed = new EmbedBuilder().setColor(COLORS.danger)
+          .setTitle('Shift Data Wiped')
+          .setDescription(`${scopeLabel} for this server has been permanently cleared.`)
+          .addFields(
+            { name: 'Completed Shifts Removed', value: `${historyDeleted}`, inline: true },
+            { name: 'Live Shifts Removed',      value: `${liveDeleted}`,    inline: true },
+            { name: 'Performed By',             value: `<@${interaction.user.id}>`, inline: true },
+          )
+          .setFooter({ text: BRAND_FOOTER })
+          .setTimestamp();
+        await interaction.editReply({ embeds: [embed] });
+        return sendModLog(interaction.guild, embed, interaction.channelId);
+      }
     } catch (err) {
-      console.error('❌ /shift error:', err);
-      const errMsg = `❌ Something went wrong running \`/shift ${sub}\`: \`${err.message}\``;
+      console.error('/shift error:', err);
+      const errMsg = `Something went wrong running \`/shift ${sub}\`: \`${err.message}\``;
       if (interaction.deferred || interaction.replied) {
         return interaction.editReply(errMsg).catch(() => {});
       }
@@ -1164,45 +1348,45 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /say ─────────────────────────────────────────────────
   if (cmd === 'say') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const message = interaction.options.getString('message');
     const channel = interaction.options.getChannel('channel') || interaction.channel;
     try {
       await channel.send(message);
-      return interaction.reply({ content: `✅ Message sent to ${channel}.`, ephemeral: true });
+      return interaction.reply({ content: `Message sent to ${channel}.`, ephemeral: true });
     } catch (err) {
-      return interaction.reply({ content: '❌ Could not send message to that channel.', ephemeral: true });
+      return interaction.reply({ content: 'Could not send message to that channel.', ephemeral: true });
     }
   }
 
   // ── /embed ───────────────────────────────────────────────
   if (cmd === 'embed') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const title = interaction.options.getString('title');
     const description = interaction.options.getString('description');
-    const color = interaction.options.getString('color') || '#5865f2';
-    const validColor = /^#[0-9A-Fa-f]{6}$/.test(color) ? color : '#5865f2';
+    const color = interaction.options.getString('color') || '#2B2D42';
+    const validColor = /^#[0-9A-Fa-f]{6}$/.test(color) ? color : '#2B2D42';
     const embed = new EmbedBuilder().setColor(validColor).setTitle(title).setDescription(description).setTimestamp();
     await interaction.channel.send({ embeds: [embed] });
-    return interaction.reply({ content: '✅ Embed posted.', ephemeral: true });
+    return interaction.reply({ content: 'Embed posted.', ephemeral: true });
   }
 
   // ── /announce ────────────────────────────────────────────
   if (cmd === 'announce') {
     if (!requireStaff(interaction, PermissionFlagsBits.Administrator))
-      return interaction.reply({ content: '❌ Administrators only.', ephemeral: true });
+      return interaction.reply({ content: 'Administrators only.', ephemeral: true });
     const targetChannel = interaction.options.getChannel('channel');
     const message = interaction.options.getString('message');
-    const embed = new EmbedBuilder().setColor('#ffd700')
-      .setTitle('📢 Announcement')
+    const embed = new EmbedBuilder().setColor(COLORS.primary)
+      .setTitle('Announcement')
       .setDescription(message)
       .setFooter({ text: `Posted by ${interaction.user.tag}` })
       .setTimestamp();
     try {
       await targetChannel.send({ content: '@everyone', embeds: [embed] });
-      return interaction.reply({ content: `✅ Announcement sent to ${targetChannel}.`, ephemeral: true });
+      return interaction.reply({ content: `Announcement sent to ${targetChannel}.`, ephemeral: true });
     } catch {
-      return interaction.reply({ content: '❌ Could not post to that channel.', ephemeral: true });
+      return interaction.reply({ content: 'Could not post to that channel.', ephemeral: true });
     }
   }
 
@@ -1210,137 +1394,138 @@ client.on('interactionCreate', async (interaction) => {
   if (cmd === 'poll') {
     const question = interaction.options.getString('question');
     const optionsRaw = interaction.options.getString('options');
-    const embed = new EmbedBuilder().setColor('#5865f2')
-      .setTitle(`📊 Poll`)
+    const embed = new EmbedBuilder().setColor(COLORS.primary)
+      .setTitle('Poll')
       .setDescription(`**${question}**`)
       .setFooter({ text: `Poll by ${interaction.user.tag}` })
       .setTimestamp();
 
     if (!optionsRaw) {
-      embed.addFields({ name: 'Options', value: '✅ Yes\n❌ No' });
+      embed.addFields({ name: 'Options', value: 'Yes\nNo' });
       const msg = await interaction.channel.send({ embeds: [embed] });
       await msg.react('✅');
       await msg.react('❌');
     } else {
       const opts = optionsRaw.split(',').map(o => o.trim()).slice(0, 9);
       const emojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣'];
-      embed.addFields({ name: 'Options', value: opts.map((o, i) => `${emojis[i]} ${o}`).join('\n') });
+      embed.addFields({ name: 'Options', value: opts.map((o, i) => `${i + 1}. ${o}`).join('\n') });
       const msg = await interaction.channel.send({ embeds: [embed] });
       for (let i = 0; i < opts.length; i++) await msg.react(emojis[i]);
     }
-    return interaction.reply({ content: '✅ Poll posted!', ephemeral: true });
+    return interaction.reply({ content: 'Poll posted.', ephemeral: true });
   }
 
   // ── /remind ──────────────────────────────────────────────
   if (cmd === 'remind') {
     const minutes = interaction.options.getInteger('minutes');
     const message = interaction.options.getString('message');
-    await interaction.reply({ content: `⏰ Got it! I'll remind you in **${minutes} minute(s)**: "${message}"`, ephemeral: true });
+    await interaction.reply({ content: `Got it — I'll remind you in **${minutes} minute(s)**: "${message}"`, ephemeral: true });
     setTimeout(async () => {
       try {
-        await interaction.user.send(`⏰ **Reminder from ${interaction.guild.name}:**\n${message}`);
+        await interaction.user.send(`Reminder from ${interaction.guild.name}:\n${message}`);
       } catch {
-        try { await interaction.channel.send(`⏰ <@${interaction.user.id}> Reminder: ${message}`); } catch { /**/ }
+        try { await interaction.channel.send(`<@${interaction.user.id}> Reminder: ${message}`); } catch { /**/ }
       }
     }, minutes * 60 * 1000);
   }
 
   // ── /dm ──────────────────────────────────────────────────
   if (cmd === 'dm') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const target = interaction.options.getUser('user');
     const message = interaction.options.getString('message');
     try {
-      await target.send(`📨 **Message from ${interaction.guild.name} Staff:**\n${message}`);
-      await interaction.reply({ content: `✅ DM sent to **${target.tag}**.`, ephemeral: true });
-      await sendModLog(interaction.guild, new EmbedBuilder().setColor('#5865f2')
-        .setTitle('📨 DM Sent via Bot')
-        .addFields({ name: '👤 To', value: `${target.tag}`, inline: true }, { name: '👮 By', value: interaction.user.tag, inline: true }, { name: '📜 Message', value: message })
+      await target.send(`Message from ${interaction.guild.name} Staff:\n${message}`);
+      await interaction.reply({ content: `DM sent to **${target.tag}**.`, ephemeral: true });
+      await sendModLog(interaction.guild, new EmbedBuilder().setColor(COLORS.primary)
+        .setTitle('DM Sent via Bot')
+        .addFields({ name: 'To', value: `${target.tag}`, inline: true }, { name: 'By', value: interaction.user.tag, inline: true }, { name: 'Message', value: message })
+        .setFooter({ text: BRAND_FOOTER })
         .setTimestamp());
     } catch {
-      return interaction.reply({ content: '❌ Could not DM that user (DMs may be closed).', ephemeral: true });
+      return interaction.reply({ content: 'Could not DM that user (DMs may be closed).', ephemeral: true });
     }
   }
 
   // ── /slowmode ────────────────────────────────────────────
   if (cmd === 'slowmode') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const secs = interaction.options.getInteger('seconds');
     const channel = interaction.options.getChannel('channel') || interaction.channel;
     try {
       await channel.setRateLimitPerUser(secs);
-      return interaction.reply({ content: secs === 0 ? `✅ Slowmode disabled in ${channel}.` : `✅ Slowmode set to **${secs}s** in ${channel}.` });
-    } catch { return interaction.reply({ content: '❌ Failed.', ephemeral: true }); }
+      return interaction.reply({ content: secs === 0 ? `Slowmode disabled in ${channel}.` : `Slowmode set to **${secs}s** in ${channel}.` });
+    } catch { return interaction.reply({ content: 'Failed.', ephemeral: true }); }
   }
 
   // ── /addrole ─────────────────────────────────────────────
   if (cmd === 'addrole') {
     if (!requireStaff(interaction, PermissionFlagsBits.ManageRoles))
-      return interaction.reply({ content: '❌ You need Manage Roles permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Manage Roles permission.', ephemeral: true });
     const target = interaction.options.getUser('user');
     const role = interaction.options.getRole('role');
     try {
       const member = await interaction.guild.members.fetch(target.id);
       await member.roles.add(role);
-      return interaction.reply({ embeds: [new EmbedBuilder().setColor('#57f287').setDescription(`✅ Added ${role} to <@${target.id}>.`)] });
+      return interaction.reply({ embeds: [new EmbedBuilder().setColor(COLORS.success).setDescription(`Added ${role} to <@${target.id}>.`)] });
     } catch (err) {
       console.error('/addrole:', err);
-      return interaction.reply({ content: '❌ Failed to add role. Check my role position and permissions.', ephemeral: true });
+      return interaction.reply({ content: 'Failed to add role. Check my role position and permissions.', ephemeral: true });
     }
   }
 
   // ── /removerole ──────────────────────────────────────────
   if (cmd === 'removerole') {
     if (!requireStaff(interaction, PermissionFlagsBits.ManageRoles))
-      return interaction.reply({ content: '❌ You need Manage Roles permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Manage Roles permission.', ephemeral: true });
     const target = interaction.options.getUser('user');
     const role = interaction.options.getRole('role');
     try {
       const member = await interaction.guild.members.fetch(target.id);
       await member.roles.remove(role);
-      return interaction.reply({ embeds: [new EmbedBuilder().setColor('#ed4245').setDescription(`✅ Removed ${role} from <@${target.id}>.`)] });
+      return interaction.reply({ embeds: [new EmbedBuilder().setColor(COLORS.danger).setDescription(`Removed ${role} from <@${target.id}>.`)] });
     } catch (err) {
       console.error('/removerole:', err);
-      return interaction.reply({ content: '❌ Failed to remove role. Check my role position and permissions.', ephemeral: true });
+      return interaction.reply({ content: 'Failed to remove role. Check my role position and permissions.', ephemeral: true });
     }
   }
 
   // ── /nickname ────────────────────────────────────────────
   if (cmd === 'nickname') {
     if (!requireStaff(interaction, PermissionFlagsBits.ManageNicknames))
-      return interaction.reply({ content: '❌ You need Manage Nicknames permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Manage Nicknames permission.', ephemeral: true });
     const target = interaction.options.getUser('user');
     const name = interaction.options.getString('name') || null;
     try {
       const member = await interaction.guild.members.fetch(target.id);
       await member.setNickname(name);
-      return interaction.reply(name ? `✅ Set <@${target.id}>'s nickname to **${name}**.` : `✅ Reset <@${target.id}>'s nickname.`);
+      return interaction.reply(name ? `Set <@${target.id}>'s nickname to **${name}**.` : `Reset <@${target.id}>'s nickname.`);
     } catch (err) {
       console.error('/nickname:', err);
-      return interaction.reply({ content: '❌ Failed to change nickname. Check my role position.', ephemeral: true });
+      return interaction.reply({ content: 'Failed to change nickname. Check my role position.', ephemeral: true });
     }
   }
 
   // ── /lockdown & /unlockdown ──────────────────────────────
   if (cmd === 'lockdown' || cmd === 'unlockdown') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const channel = interaction.options.getChannel('channel') || interaction.channel;
     const locking = cmd === 'lockdown';
     try {
       await channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: !locking });
       return interaction.reply({ embeds: [new EmbedBuilder()
-        .setColor(locking ? '#ed4245' : '#57f287')
-        .setDescription(`${locking ? '🔒 Locked' : '🔓 Unlocked'} ${channel} by <@${interaction.user.id}>.`)] });
+        .setColor(locking ? COLORS.danger : COLORS.success)
+        .setDescription(`${locking ? 'Locked' : 'Unlocked'} ${channel} by <@${interaction.user.id}>.`)] });
     } catch (err) {
       console.error(`/${cmd}:`, err);
-      return interaction.reply({ content: '❌ Failed. Check my permissions in that channel.', ephemeral: true });
+      return interaction.reply({ content: 'Failed. Check my permissions in that channel.', ephemeral: true });
     }
   }
 
   // ── /channelcreate ───────────────────────────────────────
   if (cmd === 'channelcreate') {
     if (!requireStaff(interaction, PermissionFlagsBits.Administrator))
-      return interaction.reply({ content: '❌ Administrators only.', ephemeral: true });
+      return interaction.reply({ content: 'Administrators only.', ephemeral: true });
     const name = interaction.options.getString('name');
     const type = interaction.options.getString('type');
     const category = interaction.options.getChannel('category');
@@ -1350,44 +1535,44 @@ client.on('interactionCreate', async (interaction) => {
         type: type === 'voice' ? ChannelType.GuildVoice : ChannelType.GuildText,
         parent: category?.id,
       });
-      return interaction.reply(`✅ Created ${channel}.`);
+      return interaction.reply(`Created ${channel}.`);
     } catch (err) {
       console.error('/channelcreate:', err);
-      return interaction.reply({ content: '❌ Failed to create channel.', ephemeral: true });
+      return interaction.reply({ content: 'Failed to create channel.', ephemeral: true });
     }
   }
 
   // ── /channeldelete ───────────────────────────────────────
   if (cmd === 'channeldelete') {
     if (!requireStaff(interaction, PermissionFlagsBits.Administrator))
-      return interaction.reply({ content: '❌ Administrators only.', ephemeral: true });
+      return interaction.reply({ content: 'Administrators only.', ephemeral: true });
     const channel = interaction.options.getChannel('channel');
     try {
       const name = channel.name;
       await channel.delete();
-      return interaction.reply(`✅ Deleted #${name}.`);
+      return interaction.reply(`Deleted #${name}.`);
     } catch (err) {
       console.error('/channeldelete:', err);
-      return interaction.reply({ content: '❌ Failed to delete channel.', ephemeral: true });
+      return interaction.reply({ content: 'Failed to delete channel.', ephemeral: true });
     }
   }
 
   // ── /massmove ────────────────────────────────────────────
   if (cmd === 'massmove') {
     if (!requireStaff(interaction, PermissionFlagsBits.MoveMembers))
-      return interaction.reply({ content: '❌ You need Move Members permission.', ephemeral: true });
+      return interaction.reply({ content: 'You need the Move Members permission.', ephemeral: true });
     const from = interaction.options.getChannel('from');
     const to = interaction.options.getChannel('to');
     if (from.type !== ChannelType.GuildVoice || to.type !== ChannelType.GuildVoice)
-      return interaction.reply({ content: '❌ Both channels must be voice channels.', ephemeral: true });
+      return interaction.reply({ content: 'Both channels must be voice channels.', ephemeral: true });
     await interaction.deferReply();
     try {
       const members = [...from.members.values()];
       await Promise.all(members.map((m) => m.voice.setChannel(to).catch(() => {})));
-      return interaction.editReply(`✅ Moved **${members.length}** member(s) from ${from} to ${to}.`);
+      return interaction.editReply(`Moved **${members.length}** member(s) from ${from} to ${to}.`);
     } catch (err) {
       console.error('/massmove:', err);
-      return interaction.editReply('❌ Failed to move members.');
+      return interaction.editReply('Failed to move members.');
     }
   }
 
