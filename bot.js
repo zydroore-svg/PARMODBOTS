@@ -28,7 +28,16 @@ import {
   entersState,
 } from '@discordjs/voice';
 import play from 'play-dl';
-import YTDlpWrap from 'yt-dlp-wrap';
+// yt-dlp-wrap is a CommonJS package compiled with `exports.default = ...`,
+// which Node's ESM interop sometimes surfaces as the whole exports object
+// rather than unwrapping .default automatically — depending on the
+// installed version, `import YTDlpWrap from 'yt-dlp-wrap'` can bind to
+// that wrapper object instead of the actual class, which is why
+// YTDlpWrap.downloadFromGithub (a static method on the real class) shows
+// up as "not a function". This grabs .default when present and falls back
+// to the raw import otherwise, so it works either way.
+import YTDlpWrapImport from 'yt-dlp-wrap';
+const YTDlpWrap = YTDlpWrapImport?.default ?? YTDlpWrapImport;
 import ffmpegPath from 'ffmpeg-static';
 import spotifyUrlInfoPkg from 'spotify-url-info';
 
