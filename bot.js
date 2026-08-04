@@ -40,23 +40,24 @@ if (missing.length) {
 // ── Wellness check config ──────────────────────────────────────
 const WELLNESS_CHANNEL_ID = process.env.WELLNESS_CHANNEL_ID || LOG_CHANNEL_ID;
 const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 1;
-const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 1;
+const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 15;
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
 // How long a user has to hit "I'm okay" before it counts as a failed check / strike.
 const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 1;
 const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 1 * 1;
-// Whether a missed wellness check should automatically end the member's shift.
-// Set WELLNESS_AUTO_END_SHIFT=false in .env to only issue the strike and leave
-// the shift running.
+// Whether a missed wellness check should automatically end the member's shift
+// AND permanently wipe their entire logged shift history (all past shifts,
+// not just the one in progress). Set WELLNESS_AUTO_END_SHIFT=false in .env to
+// only issue the strike and leave their shift/history untouched.
 const WELLNESS_AUTO_END_SHIFT = process.env.WELLNESS_AUTO_END_SHIFT !== 'false';
-// How many strikes (cumulative, all-time) it takes before the shift is auto-ended.
-// Default 1 = the very first missed check ends the shift immediately.
+// How many strikes (cumulative, all-time) it takes before this triggers.
+// Default 1 = the very first missed check ends the shift and wipes history.
 const WELLNESS_AUTO_END_STRIKE_THRESHOLD = parseInt(process.env.WELLNESS_AUTO_END_STRIKE_THRESHOLD, 10) || 1;
 
 console.log(`Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
 console.log(`Response window: ${WELLNESS_RESPONSE_MINUTES} min before a missed check counts as a strike`);
 console.log(WELLNESS_AUTO_END_SHIFT
-  ? `Auto-end on strike: enabled — shift ends once a member reaches ${WELLNESS_AUTO_END_STRIKE_THRESHOLD} strike(s)`
+  ? `Auto-end on strike: enabled — at ${WELLNESS_AUTO_END_STRIKE_THRESHOLD} strike(s) the shift ends AND the member's entire shift history is wiped`
   : 'Auto-end on strike: disabled — strikes are logged only');
 
 process.on('unhandledRejection', (reason) => console.error('Unhandled promise rejection:', reason));
@@ -493,6 +494,34 @@ async function wipeCollectionForGuild(collectionName, guildId) {
   return deleted;
 }
 
+// Deletes every completed-shift record for ONE user in this guild — used as
+// a wellness-check penalty (their entire logged shift history is wiped, not
+// just the session they were on when they missed the check). Their live
+// `shifts` doc is handled separately by the caller.
+async function wipeUserShiftHistory(guildId, userId) {
+  const snap = await db.collection('shiftHistory')
+    .where('guildId', '==', guildId)
+    .where('userId', '==', userId)
+    .get();
+
+  let deleted = 0;
+  let batch = db.batch();
+  let opsInBatch = 0;
+
+  for (const doc of snap.docs) {
+    batch.delete(doc.ref);
+    opsInBatch += 1;
+    deleted += 1;
+    if (opsInBatch === 400) {
+      await batch.commit();
+      batch = db.batch();
+      opsInBatch = 0;
+    }
+  }
+  if (opsInBatch > 0) await batch.commit();
+  return deleted;
+}
+
 // Builds the embed + button row for the /shift manage panel. Buttons are
 // disabled based on current status so there's nothing invalid to click:
 // Start is only enabled when off-shift, Pause/Resume + End only when on
@@ -632,12 +661,14 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
   const newStrikeCount = (shift.strikes || 0) + 1;
   const shouldAutoEnd = WELLNESS_AUTO_END_SHIFT && newStrikeCount >= WELLNESS_AUTO_END_STRIKE_THRESHOLD;
 
+  let historyWiped = 0;
+
   if (shouldAutoEnd) {
-    // End the shift outright — same bookkeeping as a manual /shift end, so it
-    // archives into shiftHistory and counts toward the leaderboard normally.
-    const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
+    // Penalty for missing a wellness check: end the shift WITHOUT archiving
+    // it (no logCompletedShift call — that session earns no credit), then
+    // erase every previously logged shift for this user too. This is
+    // intentionally destructive and cannot be undone.
     const endedAtTs = Timestamp.now();
-    const durationMs = Date.now() - startedMs;
 
     await updateShift(shift.guildId, shift.userId, {
       status: 'ended',
@@ -649,8 +680,8 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
       updatedAt: Timestamp.now(),
     });
 
-    await logCompletedShift(shift.guildId, shift.userId, shift.username, shift.startedAt, endedAtTs, durationMs)
-      .catch((err) => console.error('Failed to archive auto-ended shift:', err));
+    historyWiped = await wipeUserShiftHistory(shift.guildId, shift.userId)
+      .catch((err) => { console.error('Failed to wipe shift history after strike:', err); return 0; });
   } else {
     await updateShift(shift.guildId, shift.userId, {
       pendingCheckSentAt: null,
@@ -666,8 +697,19 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
     shift.guildId,
     shift.userId,
     shift.username,
-    `Failed to acknowledge wellness check within ${WELLNESS_RESPONSE_MINUTES} minutes${shouldAutoEnd ? ' — shift auto-ended' : ''}`
+    `Failed to acknowledge wellness check within ${WELLNESS_RESPONSE_MINUTES} minutes` +
+      (shouldAutoEnd ? ` — shift ended, ${historyWiped} logged shift(s) wiped` : '')
   ).catch((err) => console.error('Failed to log wellness strike:', err));
+
+  if (shouldAutoEnd) {
+    await logModAction(
+      'wellness_history_wipe',
+      { id: shift.userId, tag: shift.username },
+      client.user,
+      `Entire shift history wiped after missing a wellness check (strike ${newStrikeCount})`,
+      { shiftsWiped: historyWiped }
+    ).catch((err) => console.error('Failed to log history wipe to modlogs:', err));
+  }
 
   // Disable/mark the original check message so it's clear it timed out.
   if (shift.pendingCheckMessageId && shift.pendingCheckChannelId) {
@@ -678,7 +720,7 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
       if (oldMsg && oldMsg.embeds[0]) {
         const failedEmbed = EmbedBuilder.from(oldMsg.embeds[0])
           .setColor(COLORS.danger)
-          .setFooter({ text: shouldAutoEnd ? 'No response received — strike issued, shift ended' : 'No response received — strike issued' });
+          .setFooter({ text: shouldAutoEnd ? 'No response received — strike issued, shift history wiped' : 'No response received — strike issued' });
         await oldMsg.edit({ embeds: [failedEmbed], components: [] }).catch(() => {});
       }
     } catch { /* best effort */ }
@@ -686,12 +728,15 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
 
   const failEmbed = new EmbedBuilder()
     .setColor(COLORS.danger)
-    .setTitle(shouldAutoEnd ? 'Wellness Check Failed — Shift Ended' : 'Wellness Check Failed')
+    .setTitle(shouldAutoEnd ? 'Wellness Check Failed — Shift History Wiped' : 'Wellness Check Failed')
     .setDescription(
       `<@${shift.userId}> did not respond to their wellness check within ${WELLNESS_RESPONSE_MINUTES} minute(s).` +
-      (shouldAutoEnd ? '\n\nTheir shift has been automatically ended.' : '')
+      (shouldAutoEnd ? '\n\nTheir shift has ended and their entire logged shift history has been permanently deleted as a penalty.' : '')
     )
-    .addFields({ name: 'Strike Count', value: `${newStrikeCount}`, inline: true })
+    .addFields(
+      { name: 'Strike Count', value: `${newStrikeCount}`, inline: true },
+      ...(shouldAutoEnd ? [{ name: 'Shifts Wiped', value: `${historyWiped}`, inline: true }] : []),
+    )
     .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
 
@@ -701,7 +746,7 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
     try {
       const member = await guild.members.fetch(shift.userId).catch(() => null);
       await member?.user.send(
-        `You missed a wellness check in **${guild.name}** and your shift has been automatically ended. ` +
+        `You missed a wellness check in **${guild.name}**. Your shift has ended and your entire logged shift history has been wiped as a penalty. ` +
         `Run \`/shift manage\` if you'd like to clock back in.`
       );
     } catch { /* DMs may be closed — non-fatal */ }
