@@ -143,11 +143,18 @@ const SLASH_COMMANDS = [
     name: 'shift',
     description: 'Manage your on-duty shift',
     options: [
-      { name: 'start',  description: 'Start your shift (clock in / on duty)', type: 1 },
-      { name: 'pause',  description: 'Pause your current shift',              type: 1 },
-      { name: 'resume', description: 'Resume a paused shift',                 type: 1 },
-      { name: 'end',    description: 'End your shift (clock out)',            type: 1 },
-      { name: 'active', description: 'List everyone currently on shift',      type: 1 },
+      {
+        name: 'manage',
+        description: 'Start, pause, resume, or end your shift',
+        type: 2, // SUB_COMMAND_GROUP — renders as the "trident" nested menu in Discord
+        options: [
+          { name: 'start',  description: 'Start your shift (clock in / on duty)', type: 1 },
+          { name: 'pause',  description: 'Pause your current shift',              type: 1 },
+          { name: 'resume', description: 'Resume a paused shift',                 type: 1 },
+          { name: 'end',    description: 'End your shift (clock out)',            type: 1 },
+        ],
+      },
+      { name: 'active', description: 'List everyone currently on shift', type: 1 },
       {
         name: 'leaderboard',
         description: 'Show top staff by total shift time',
@@ -211,6 +218,17 @@ const SLASH_COMMANDS = [
 client.once('ready', async () => {
   console.log(`🤖 Bot ready as ${client.user.tag}`);
   try {
+    // Wipe any GLOBAL commands from a previous deploy first. If commands
+    // were ever registered globally (client.application.commands.set) in
+    // addition to this guild's commands, Discord shows BOTH copies in the
+    // command picker — that's what causes entries like "/shift active" or
+    // "/shift pause" to appear duplicated. This bot only ever wants
+    // guild-scoped commands (they also update instantly, vs. up to an hour
+    // for global ones), so we forcibly clear global commands on every boot
+    // to guarantee stragglers can't linger or come back.
+    await client.application.commands.set([]);
+    console.log('🧹 Cleared global slash commands (guild commands are authoritative)');
+
     // Guild-scoped registration updates instantly (global commands can take
     // up to an hour to propagate, which is the usual reason "new" or
     // "changed" commands don't show up right away).
@@ -376,9 +394,9 @@ async function getActiveGuildShifts(guildId) {
 }
 
 // The `shifts` collection holds one LIVE doc per user, overwritten every
-// time they run /shift start — so it can't answer "who's worked the most
-// total time." Every completed shift gets archived here instead, which is
-// what the leaderboard reads from.
+// time they run /shift manage start — so it can't answer "who's worked the
+// most total time." Every completed shift gets archived here instead, which
+// is what the leaderboard reads from.
 async function logCompletedShift(guildId, userId, username, startedAt, endedAt, durationMs) {
   await db.collection('shiftHistory').add({
     guildId,
@@ -1044,6 +1062,10 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /shift ───────────────────────────────────────────────
   if (cmd === 'shift') {
+    // getSubcommand() returns the leaf subcommand name ('start', 'pause',
+    // 'resume', 'end', 'active', 'leaderboard') regardless of whether it's
+    // nested under the 'manage' subcommand group — no other logic below
+    // needs to change to support the grouping.
     const sub = interaction.options.getSubcommand();
     const guildId = interaction.guild.id;
     const userId = interaction.user.id;
@@ -1052,7 +1074,7 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'start') {
         const existing = await getShift(guildId, userId);
         if (existing && existing.status !== 'ended') {
-          return interaction.reply({ content: `❌ You're already on shift (status: **${existing.status.toUpperCase()}**). Use \`/shift end\` first.`, ephemeral: true });
+          return interaction.reply({ content: `❌ You're already on shift (status: **${existing.status.toUpperCase()}**). Use \`/shift manage end\` first.`, ephemeral: true });
         }
         await createShift(guildId, userId, interaction.user.username);
         const embed = new EmbedBuilder().setColor('#57f287')
