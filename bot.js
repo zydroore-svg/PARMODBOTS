@@ -148,6 +148,22 @@ const SLASH_COMMANDS = [
       { name: 'resume', description: 'Resume a paused shift',                 type: 1 },
       { name: 'end',    description: 'End your shift (clock out)',            type: 1 },
       { name: 'active', description: 'List everyone currently on shift',      type: 1 },
+      {
+        name: 'leaderboard',
+        description: 'Show top staff by total shift time',
+        type: 1,
+        options: [{
+          name: 'period',
+          description: 'Time period (default: all time)',
+          type: 3,
+          required: false,
+          choices: [
+            { name: 'This Week',  value: 'week' },
+            { name: 'This Month', value: 'month' },
+            { name: 'All Time',   value: 'all' },
+          ],
+        }],
+      },
     ],
   },
 
@@ -357,6 +373,51 @@ async function getActiveGuildShifts(guildId) {
     .where('status', 'in', ['active', 'paused'])
     .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// The `shifts` collection holds one LIVE doc per user, overwritten every
+// time they run /shift start — so it can't answer "who's worked the most
+// total time." Every completed shift gets archived here instead, which is
+// what the leaderboard reads from.
+async function logCompletedShift(guildId, userId, username, startedAt, endedAt, durationMs) {
+  await db.collection('shiftHistory').add({
+    guildId,
+    userId,
+    username,
+    startedAt,
+    endedAt,
+    durationMs,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+}
+
+// Single equality filter only (no range/orderBy) so this never needs a
+// Firestore composite index — week/month filtering happens in memory below.
+async function getShiftLeaderboard(guildId, period = 'all') {
+  const snap = await db.collection('shiftHistory').where('guildId', '==', guildId).get();
+
+  const now = Date.now();
+  const cutoffMs = period === 'week' ? now - 7 * 24 * 60 * 60 * 1000
+    : period === 'month' ? now - 30 * 24 * 60 * 60 * 1000
+    : 0;
+
+  const totals = new Map(); // userId -> { username, totalMs, shiftCount }
+  for (const doc of snap.docs) {
+    const d = doc.data();
+    const endedMs = d.endedAt?.toDate?.().getTime();
+    if (!endedMs) continue;
+    if (period !== 'all' && endedMs < cutoffMs) continue;
+
+    const entry = totals.get(d.userId) || { username: d.username, totalMs: 0, shiftCount: 0 };
+    entry.totalMs += d.durationMs || 0;
+    entry.shiftCount += 1;
+    entry.username = d.username;
+    totals.set(d.userId, entry);
+  }
+
+  return [...totals.entries()]
+    .map(([userId, v]) => ({ userId, ...v }))
+    .sort((a, b) => b.totalMs - a.totalMs);
 }
 
 // Issue a wellness-check strike — logged into the same `warnings` collection
@@ -1027,18 +1088,22 @@ client.on('interactionCreate', async (interaction) => {
 
         if (sub === 'end') {
           const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
+          const endedAtTs = Timestamp.now();
+          const durationMs = Date.now() - startedMs;
           await updateShift(guildId, userId, {
             status: 'ended',
-            endedAt: Timestamp.now(),
+            endedAt: endedAtTs,
             pendingCheckSentAt: null,
             pendingCheckMessageId: null,
             pendingCheckChannelId: null,
             updatedAt: Timestamp.now(),
           });
+          await logCompletedShift(guildId, userId, interaction.user.username, shift.startedAt, endedAtTs, durationMs)
+            .catch((err) => console.error('Failed to archive completed shift for leaderboard:', err));
           const embed = new EmbedBuilder().setColor('#ed4245')
             .setTitle('🔴 Shift Ended')
             .setDescription(`<@${userId}> has clocked out.`)
-            .addFields({ name: '🕒 Total Duration', value: formatDuration(Date.now() - startedMs) })
+            .addFields({ name: '🕒 Total Duration', value: formatDuration(durationMs) })
             .setTimestamp();
           await interaction.reply({ embeds: [embed] });
           return sendModLog(interaction.guild, embed, interaction.channelId);
@@ -1063,6 +1128,27 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder().setColor('#5865f2')
           .setTitle('🕒 Active Shifts')
           .setDescription(lines.join('\n'))
+          .setTimestamp();
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      if (sub === 'leaderboard') {
+        await interaction.deferReply();
+        const period = interaction.options.getString('period') || 'all';
+        const board = await getShiftLeaderboard(guildId, period);
+        if (board.length === 0) return interaction.editReply('📭 No completed shifts recorded yet for that period.');
+
+        const medals = ['🥇', '🥈', '🥉'];
+        const lines = board.slice(0, 10).map((entry, i) => {
+          const rank = medals[i] || `**${i + 1}.**`;
+          return `${rank} <@${entry.userId}> — **${formatDuration(entry.totalMs)}** (${entry.shiftCount} shift${entry.shiftCount === 1 ? '' : 's'})`;
+        });
+
+        const periodLabel = period === 'week' ? 'This Week' : period === 'month' ? 'This Month' : 'All Time';
+        const embed = new EmbedBuilder().setColor('#ffd700')
+          .setTitle(`🏆 Shift Leaderboard — ${periodLabel}`)
+          .setDescription(lines.join('\n'))
+          .setFooter({ text: `Showing top ${Math.min(board.length, 10)} of ${board.length}` })
           .setTimestamp();
         return interaction.editReply({ embeds: [embed] });
       }
