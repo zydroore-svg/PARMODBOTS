@@ -35,6 +35,7 @@ import {
   getDocs,
   getDoc,
   doc,
+  setDoc,
   updateDoc,
   deleteDoc,
   query,
@@ -74,6 +75,19 @@ if (missing.length) {
   console.error('❌ Missing required environment variables:', missing.join(', '));
   process.exit(1);
 }
+
+// ── Wellness check config ──────────────────────────────────────
+// Optional overrides — falls back to LOG_CHANNEL_ID, a 60-minute interval,
+// and a 5-minute scan cycle. Lower WELLNESS_CHECK_MINUTES and
+// WELLNESS_POLL_SECONDS in your .env to test quickly, e.g.:
+//   WELLNESS_CHECK_MINUTES=1
+//   WELLNESS_POLL_SECONDS=20
+const WELLNESS_CHANNEL_ID = process.env.WELLNESS_CHANNEL_ID || LOG_CHANNEL_ID;
+const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 60;
+const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 300; // default: scan every 5 min
+const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
+
+console.log(`🩺 Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
 
 process.on('unhandledRejection', (reason) => console.error('❌ Unhandled promise rejection:', reason));
 process.on('uncaughtException', (err) => { console.error('❌ Uncaught exception:', err); process.exit(1); });
@@ -130,6 +144,19 @@ const SLASH_COMMANDS = [
   { name: 'untimeout', description: 'Remove a timeout from a user',          options: [{ name: 'user', description: 'User to untimeout', type: 6, required: true }] },
   { name: 'purge',     description: 'Bulk-delete messages from this channel', options: [{ name: 'amount', description: 'Number of messages (1–100)', type: 4, required: true, min_value: 1, max_value: 100 }, { name: 'user', description: 'Only delete messages from this user (optional)', type: 6, required: false }] },
 
+  // ── Shift management & wellness ──
+  {
+    name: 'shift',
+    description: 'Manage your on-duty shift',
+    options: [
+      { name: 'start',  description: 'Start your shift (clock in / on duty)', type: 1 },
+      { name: 'pause',  description: 'Pause your current shift',              type: 1 },
+      { name: 'resume', description: 'Resume a paused shift',                 type: 1 },
+      { name: 'end',    description: 'End your shift (clock out)',            type: 1 },
+      { name: 'active', description: 'List everyone currently on shift',      type: 1 },
+    ],
+  },
+
   // ── Info & lookup ──
   { name: 'ping',       description: 'Check bot latency' },
   { name: 'userinfo',   description: 'Show info about a user',   options: [{ name: 'user', description: 'User to look up', type: 6, required: false }] },
@@ -156,6 +183,9 @@ client.once('ready', async () => {
   } catch (err) {
     console.error('❌ Failed to register slash commands:', err);
   }
+  // Start the wellness-check scheduler once the bot is logged in
+  setInterval(runWellnessCheck, WELLNESS_POLL_MS);
+  runWellnessCheck(); // run one pass immediately on boot
 });
 
 client.login(DISCORD_BOT_TOKEN).catch((err) => {
@@ -341,6 +371,123 @@ async function getModLogs(userId) {
   const q = query(collection(db, 'modlogs'), where('userId', '==', userId), orderBy('createdAt', 'desc'));
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// ── Shift / Wellness helpers ────────────────────────────────────
+
+function formatDuration(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const parts = [];
+  if (h) parts.push(`${h}h`);
+  if (m || h) parts.push(`${m}m`);
+  parts.push(`${s}s`);
+  return parts.join(' ');
+}
+
+function shiftDocId(guildId, userId) {
+  return `${guildId}_${userId}`;
+}
+
+// Fetch a single user's shift record (or null if they've never started one)
+async function getShift(guildId, userId) {
+  const ref = doc(db, 'shifts', shiftDocId(guildId, userId));
+  const snap = await getDoc(ref);
+  return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+}
+
+// Create/overwrite a shift record when someone starts a shift
+async function createShift(guildId, userId, username) {
+  const ref = doc(db, 'shifts', shiftDocId(guildId, userId));
+  const now = Timestamp.now();
+  await setDoc(ref, {
+    guildId,
+    userId,
+    username,
+    status: 'active',        // 'active' | 'paused' | 'ended'
+    startedAt: now,
+    activeSince: now,         // resets whenever status becomes 'active' (start or resume)
+    lastWellnessCheckAt: now, // resets on start/resume and after every wellness ping
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+// All shift records in a guild that are currently active or paused (i.e. "on shift")
+async function getActiveGuildShifts(guildId) {
+  const q = query(
+    collection(db, 'shifts'),
+    where('guildId', '==', guildId),
+    where('status', 'in', ['active', 'paused']),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// ── Wellness check scheduler ────────────────────────────────────
+// Runs on an interval. Only pings people whose shift status is 'active'
+// (paused/ended staff are skipped entirely) and who have been active for
+// WELLNESS_CHECK_MINUTES since their last check-in (or since shift start).
+async function runWellnessCheck() {
+  try {
+    const q = query(
+      collection(db, 'shifts'),
+      where('guildId', '==', GUILD_ID),
+      where('status', '==', 'active'),
+    );
+    const snap = await getDocs(q);
+    if (snap.empty) return;
+
+    const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
+    if (!guild) return;
+    const channel = guild.channels.cache.get(WELLNESS_CHANNEL_ID) || await guild.channels.fetch(WELLNESS_CHANNEL_ID).catch(() => null);
+    if (!channel) return;
+
+    const now = Date.now();
+    const thresholdMs = WELLNESS_CHECK_MINUTES * 60 * 1000;
+
+    for (const docSnap of snap.docs) {
+      const shift = docSnap.data();
+      const checkpointMs = (shift.lastWellnessCheckAt || shift.activeSince || shift.startedAt)?.toDate?.().getTime();
+      if (!checkpointMs) continue;
+      if (now - checkpointMs < thresholdMs) continue; // not due yet
+
+      const startedMs = shift.startedAt?.toDate?.().getTime() ?? now;
+
+      const embed = new EmbedBuilder()
+        .setColor('#faa61a')
+        .setTitle('🩺 Wellness Check')
+        .setDescription(`Hey <@${shift.userId}>, you've been on duty for a while — just checking in on you!`)
+        .addFields(
+          { name: '🕒 On Shift For', value: formatDuration(now - startedMs), inline: true },
+          { name: '📋 Status',       value: 'ON DUTY',                      inline: true },
+        )
+        .setFooter({ text: "Tap the button below to let us know you're okay." })
+        .setTimestamp();
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`wellness_ack_${shift.userId}`)
+          .setLabel("I'm okay")
+          .setEmoji('✅')
+          .setStyle(ButtonStyle.Success)
+      );
+
+      try {
+        await channel.send({ content: `<@${shift.userId}>`, embeds: [embed], components: [row] });
+      } catch (err) {
+        console.error('Wellness check send failed:', err);
+      }
+
+      // Reset the clock so they get pinged again in another WELLNESS_CHECK_MINUTES
+      // if they're still on duty, rather than being pinged every poll cycle.
+      await updateDoc(doc(db, 'shifts', docSnap.id), { lastWellnessCheckAt: Timestamp.now() });
+    }
+  } catch (err) {
+    console.error('Wellness check error:', err);
+  }
 }
 
 // ── 5. Express app ────────────────────────────────────────────
@@ -854,6 +1001,84 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
+    // ── /shift ───────────────────────────────────────────────
+    if (cmd === 'shift') {
+      const sub = interaction.options.getSubcommand();
+      const guildId = interaction.guild.id;
+      const userId = interaction.user.id;
+
+      if (sub === 'start') {
+        const existing = await getShift(guildId, userId);
+        if (existing && existing.status !== 'ended') {
+          return interaction.reply({ content: `❌ You're already on shift (status: **${existing.status.toUpperCase()}**). Use \`/shift end\` first.`, ephemeral: true });
+        }
+        await createShift(guildId, userId, interaction.user.username);
+        const embed = new EmbedBuilder().setColor('#57f287')
+          .setTitle('🟢 Shift Started')
+          .setDescription(`<@${userId}> is now **ON DUTY**. You'll get a wellness check-in every ${WELLNESS_CHECK_MINUTES} minutes while active.`)
+          .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+        return sendModLog(interaction.guild, embed);
+      }
+
+      if (sub === 'pause' || sub === 'resume' || sub === 'end') {
+        const shift = await getShift(guildId, userId);
+        if (!shift || shift.status === 'ended') {
+          return interaction.reply({ content: '❌ You are not currently on shift.', ephemeral: true });
+        }
+
+        if (sub === 'pause') {
+          if (shift.status === 'paused') return interaction.reply({ content: '⏸️ Your shift is already paused.', ephemeral: true });
+          await updateDoc(doc(db, 'shifts', shiftDocId(guildId, userId)), { status: 'paused', updatedAt: Timestamp.now() });
+          const embed = new EmbedBuilder().setColor('#fee75c').setDescription(`⏸️ <@${userId}>'s shift is now **PAUSED**. Wellness checks are paused too.`);
+          await interaction.reply({ embeds: [embed] });
+          return sendModLog(interaction.guild, embed);
+        }
+
+        if (sub === 'resume') {
+          if (shift.status === 'active') return interaction.reply({ content: '▶️ Your shift is already active.', ephemeral: true });
+          const now = Timestamp.now();
+          await updateDoc(doc(db, 'shifts', shiftDocId(guildId, userId)), { status: 'active', activeSince: now, lastWellnessCheckAt: now, updatedAt: now });
+          const embed = new EmbedBuilder().setColor('#57f287').setDescription(`▶️ <@${userId}>'s shift is **ACTIVE** again.`);
+          await interaction.reply({ embeds: [embed] });
+          return sendModLog(interaction.guild, embed);
+        }
+
+        if (sub === 'end') {
+          const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
+          await updateDoc(doc(db, 'shifts', shiftDocId(guildId, userId)), { status: 'ended', endedAt: Timestamp.now(), updatedAt: Timestamp.now() });
+          const embed = new EmbedBuilder().setColor('#ed4245')
+            .setTitle('🔴 Shift Ended')
+            .setDescription(`<@${userId}> has clocked out.`)
+            .addFields({ name: '🕒 Total Duration', value: formatDuration(Date.now() - startedMs) })
+            .setTimestamp();
+          await interaction.reply({ embeds: [embed] });
+          return sendModLog(interaction.guild, embed);
+        }
+      }
+
+      if (sub === 'active') {
+        await interaction.deferReply();
+        const shifts = await getActiveGuildShifts(guildId);
+        if (shifts.length === 0) return interaction.editReply('📭 No one is currently on shift.');
+
+        const now = Date.now();
+        const lines = shifts
+          .sort((a, b) => (a.startedAt?.toDate?.().getTime() ?? 0) - (b.startedAt?.toDate?.().getTime() ?? 0))
+          .map((s, i) => {
+            const started = s.startedAt?.toDate?.().getTime() ?? now;
+            const statusIcon = s.status === 'active' ? '🟢' : '⏸️';
+            return `${i + 1}. ${statusIcon} <@${s.userId}> — ${formatDuration(now - started)} (${s.status.toUpperCase()})`;
+          });
+
+        const embed = new EmbedBuilder().setColor('#5865f2')
+          .setTitle('🕒 Active Shifts')
+          .setDescription(lines.join('\n'))
+          .setTimestamp();
+        return interaction.editReply({ embeds: [embed] });
+      }
+    }
+
     // ── /say ─────────────────────────────────────────────────
     if (cmd === 'say') {
       if (!requireStaff(interaction)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
@@ -1143,5 +1368,18 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.customId === 'cancel_close') return interaction.update({ content: '❌ Closing cancelled.', components: [] });
     await interaction.update({ content: '📑 Generating transcript...', components: [] });
     await performClose(interaction, interaction.channel);
+  }
+
+  // ── Wellness check acknowledge button ─────────────────────
+  if (interaction.isButton() && interaction.customId.startsWith('wellness_ack_')) {
+    const targetId = interaction.customId.replace('wellness_ack_', '');
+    if (interaction.user.id !== targetId) {
+      return interaction.reply({ content: "❌ This check-in isn't for you.", ephemeral: true });
+    }
+    const original = interaction.message.embeds[0];
+    const embed = EmbedBuilder.from(original)
+      .setColor('#57f287')
+      .setFooter({ text: `✅ Acknowledged by ${interaction.user.tag}` });
+    return interaction.update({ embeds: [embed], components: [] });
   }
 });
