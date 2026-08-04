@@ -40,7 +40,7 @@ if (missing.length) {
 // ── Wellness check config ──────────────────────────────────────
 const WELLNESS_CHANNEL_ID = process.env.WELLNESS_CHANNEL_ID || LOG_CHANNEL_ID;
 const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 1;
-const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 15;
+const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 1;
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
 // How long a user has to hit "I'm okay" before it counts as a failed check / strike.
 const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 1;
