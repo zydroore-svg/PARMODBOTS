@@ -636,7 +636,7 @@ async function sendWellnessCheck(channel, shift, now) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`wellness_ack_${shift.userId}`)
-      .setLabel("I'm okay")
+      .setLabel("Acknowledge")
       .setStyle(ButtonStyle.Success)
   );
 
@@ -924,6 +924,14 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   const cmd = interaction.commandName;
+
+  // Safety net: EVERY command below runs inside this try/catch. Without it,
+  // an error thrown after deferReply() (e.g. a Firestore query that needs a
+  // composite index that hasn't been created yet — see getModLogs) becomes
+  // an unhandled rejection that never calls editReply(), so Discord just
+  // shows "thinking..." until the interaction token expires ~15 minutes
+  // later. This guarantees every command either succeeds or fails visibly.
+  try {
 
   // ── /ping ────────────────────────────────────────────────
   if (cmd === 'ping') {
@@ -1666,4 +1674,15 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
+  } catch (err) {
+    console.error(`Command /${cmd} failed:`, err);
+    const errMsg = err.code === 9 || /FAILED_PRECONDITION|requires an index/i.test(err.message || '')
+      ? 'This command needs a Firestore index that hasn\'t been created yet. Check the bot\'s console logs for a link to create it, then try again.'
+      : `Something went wrong running \`/${cmd}\`: \`${err.message}\``;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(errMsg).catch(() => {});
+    } else {
+      await interaction.reply({ content: errMsg, ephemeral: true }).catch(() => {});
+    }
+  }
 });
