@@ -3,7 +3,8 @@
 //  Run with:  node bot.js
 // ─────────────────────────────────────────────────────────────
 import express from 'express';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import path from 'path';
 import 'dotenv/config';
 
 import {
@@ -23,9 +24,11 @@ import {
   createAudioResource,
   AudioPlayerStatus,
   VoiceConnectionStatus,
+  StreamType,
   entersState,
 } from '@discordjs/voice';
 import play from 'play-dl';
+import YTDlpWrap from 'yt-dlp-wrap';
 import ffmpegPath from 'ffmpeg-static';
 import spotifyUrlInfoPkg from 'spotify-url-info';
 
@@ -37,8 +40,10 @@ if (ffmpegPath) process.env.FFMPEG_PATH = ffmpegPath;
 // play-dl auth — cloud hosts (Railway, Render, AWS, etc.) get IP-blocked by
 // YouTube's bot detection ("Sign in to confirm you're not a bot") far more
 // often than a home connection does. Setting YOUTUBE_COOKIE in your env
-// authenticates play-dl as a real logged-in browser session and usually
-// fixes streams that fail 100% of the time. Optional — only runs if set.
+// authenticates play-dl as a real logged-in browser session. This still
+// helps play-dl's search/info lookups (used below), even though the actual
+// audio *streaming* now goes through yt-dlp instead — see the yt-dlp setup
+// block further down for why.
 if (process.env.YOUTUBE_COOKIE) {
   try {
     await play.setToken({ youtube: { cookie: process.env.YOUTUBE_COOKIE } });
@@ -47,7 +52,54 @@ if (process.env.YOUTUBE_COOKIE) {
     console.error('❌ Failed to set play-dl YouTube cookie:', err.message);
   }
 } else {
-  console.log('ℹ️  No YOUTUBE_COOKIE set — if music streams keep failing, this is likely why. See chat for setup steps.');
+  console.log('ℹ️  No YOUTUBE_COOKIE set — search/lookup may be less reliable without it.');
+}
+
+// ── yt-dlp setup for music STREAMING ─────────────────────────────
+// YouTube added a second, stricter check on the actual audio-stream
+// endpoint (on top of the cookie-based bot check) that play-dl can't get
+// past — no amount of cookie configuration fixes it, because play-dl
+// doesn't support the token type YouTube now wants there. yt-dlp is
+// actively maintained against these changes, so it's what actually fetches
+// the audio now. play-dl is kept for search/info lookups only, which still
+// work fine with YOUTUBE_COOKIE.
+const YTDLP_BIN_DIR = path.join(process.cwd(), '.bin');
+const YTDLP_BIN_PATH = path.join(YTDLP_BIN_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+
+async function ensureYtDlpBinary() {
+  if (existsSync(YTDLP_BIN_PATH)) return;
+  console.log('⬇️  Downloading yt-dlp binary (first boot only)...');
+  if (!existsSync(YTDLP_BIN_DIR)) mkdirSync(YTDLP_BIN_DIR, { recursive: true });
+  await YTDlpWrap.downloadFromGithub(YTDLP_BIN_PATH);
+  console.log('✅ yt-dlp binary ready');
+}
+
+await ensureYtDlpBinary();
+const ytDlpWrap = new YTDlpWrap(YTDLP_BIN_PATH);
+
+// yt-dlp expects cookies as a Netscape-format cookies.txt file, not the raw
+// "key=value; key2=value2" header string play-dl uses — so we convert
+// YOUTUBE_COOKIE once at boot and let both libraries share the one env var.
+let YTDLP_COOKIES_PATH = null;
+if (process.env.YOUTUBE_COOKIE) {
+  try {
+    const pairs = process.env.YOUTUBE_COOKIE.split(';').map((p) => p.trim()).filter(Boolean);
+    const lines = ['# Netscape HTTP Cookie File'];
+    for (const pair of pairs) {
+      const idx = pair.indexOf('=');
+      if (idx === -1) continue;
+      const name = pair.slice(0, idx).trim();
+      const value = pair.slice(idx + 1).trim();
+      // domain  includeSubdomains  path  secure  expiry(0=session)  name  value
+      lines.push(['.youtube.com', 'TRUE', '/', 'TRUE', '0', name, value].join('\t'));
+    }
+    if (!existsSync(YTDLP_BIN_DIR)) mkdirSync(YTDLP_BIN_DIR, { recursive: true });
+    YTDLP_COOKIES_PATH = path.join(YTDLP_BIN_DIR, 'cookies.txt');
+    writeFileSync(YTDLP_COOKIES_PATH, lines.join('\n') + '\n');
+    console.log('🍪 yt-dlp cookies file generated from YOUTUBE_COOKIE');
+  } catch (err) {
+    console.error('❌ Failed to build yt-dlp cookies file:', err.message);
+  }
 }
 
 // Spotify link resolution — spotify-url-info scrapes the public embed page,
@@ -714,18 +766,53 @@ function spotifyTrackToSong(t, requestedBy) {
   };
 }
 
-// play-dl's `quality` option picks which audio format to request. Highest
-// quality (2) is preferred but occasionally the format YouTube hands back
-// for it fails mid-stream on cloud IPs; quality 0 (lowest/most compatible)
-// tends to succeed when that happens. Retrying across both plus a short
-// backoff absorbs most of the transient "bot detection" / rate-limit
-// failures that used to just skip the track outright.
-async function streamWithRetry(url, attempts = 3) {
+// Spawns yt-dlp as a subprocess and streams bestaudio straight to stdout,
+// piped into @discordjs/voice as an "arbitrary" stream — @discordjs/voice
+// runs its own ffmpeg internally to transcode whatever container format
+// comes back (usually webm/opus) into something Discord's voice gateway
+// can play, so we don't need to touch ffmpeg ourselves here.
+function ytDlpAudioStream(url) {
+  const args = [
+    url,
+    '-f', 'bestaudio/best',
+    '-o', '-',
+    '--no-playlist',
+    '--no-warnings',
+    '--quiet',
+    '--no-part',
+  ];
+  if (YTDLP_COOKIES_PATH) args.push('--cookies', YTDLP_COOKIES_PATH);
+  return ytDlpWrap.execStream(args);
+}
+
+// Wraps ytDlpAudioStream with a retry: if yt-dlp fails immediately (bad
+// URL, extractor error, still-blocked stream, etc.) we get an early
+// 'error' event on the stream rather than a silent empty pipe, which lets
+// this loop actually retry instead of handing @discordjs/voice a dead
+// stream. Once data starts flowing we stop watching and hand the stream
+// off as-is.
+async function streamWithRetry(url, attempts = 2) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
-    const quality = i === 0 ? 2 : 0;
     try {
-      return await play.stream(url, { quality });
+      const stream = ytDlpAudioStream(url);
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const onData = () => { if (!settled) { settled = true; cleanup(); resolve(); } };
+        const onError = (err) => { if (!settled) { settled = true; cleanup(); reject(err); } };
+        const onClose = () => { if (!settled) { settled = true; cleanup(); resolve(); } }; // very short clips can close before 'data'
+        function cleanup() {
+          stream.off('data', onData);
+          stream.off('error', onError);
+          stream.off('close', onClose);
+        }
+        stream.once('data', onData);
+        stream.once('error', onError);
+        stream.once('close', onClose);
+        // Failsafe: don't hang forever if yt-dlp is just being slow to start.
+        setTimeout(() => { if (!settled) { settled = true; cleanup(); resolve(); } }, 8000);
+      });
+      return { stream, type: StreamType.Arbitrary };
     } catch (err) {
       lastErr = err;
       const msg = err?.message || '';
