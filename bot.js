@@ -73,7 +73,7 @@ const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) ||
 const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 300;
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
 // How long a user has to hit "I'm okay" before it counts as a failed check / strike.
-const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 15;
+const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 2;
 const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 60 * 1000;
 
 console.log(`🩺 Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
