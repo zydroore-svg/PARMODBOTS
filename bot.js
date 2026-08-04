@@ -39,12 +39,12 @@ if (missing.length) {
 
 // ── Wellness check config ──────────────────────────────────────
 const WELLNESS_CHANNEL_ID = process.env.WELLNESS_CHANNEL_ID || LOG_CHANNEL_ID;
-const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 1;
+const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 60;
 const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 15;
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
-// How long a user has to hit "I'm okay" before it counts as a failed check / strike.
-const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 1;
-const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 1 * 1;
+// How long a user has to hit "Acknowledge" before it counts as a failed check / strike.
+const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 15;
+const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 60 * 1000;
 // Whether a missed wellness check should automatically end the member's shift
 // AND permanently wipe their entire logged shift history (all past shifts,
 // not just the one in progress). Set WELLNESS_AUTO_END_SHIFT=false in .env to
