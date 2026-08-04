@@ -107,11 +107,34 @@ async function ensureYtDlpBinary() {
 await ensureYtDlpBinary();
 const ytDlpWrap = new YTDlpWrap(YTDLP_BIN_PATH);
 
-// yt-dlp expects cookies as a Netscape-format cookies.txt file, not the raw
-// "key=value; key2=value2" header string play-dl uses — so we convert
-// YOUTUBE_COOKIE once at boot and let both libraries share the one env var.
+// yt-dlp expects cookies as a Netscape-format cookies.txt file. Two ways
+// to provide that:
+//
+//   1. YTDLP_COOKIES_TXT — paste the FULL raw contents of a cookies.txt
+//      file exported directly from a browser extension (e.g. "Get
+//      cookies.txt LOCALLY"), Netscape format, as-is. This is the most
+//      reliable option since it includes every cookie the browser has
+//      (SID, HSID, SSID, APISID, SAPISID, LOGIN_INFO, etc.), not just the
+//      handful play-dl happens to need.
+//   2. YOUTUBE_COOKIE — the semicolon-separated "key=value; key2=value2"
+//      header string used for play-dl. We convert this into a Netscape
+//      file as a fallback, but it only carries whatever fields you
+//      originally copied for play-dl, which is why it worked for play-dl's
+//      search/info calls but wasn't enough for yt-dlp's stricter check.
+//
+// If both are set, YTDLP_COOKIES_TXT wins.
 let YTDLP_COOKIES_PATH = null;
-if (process.env.YOUTUBE_COOKIE) {
+if (!existsSync(YTDLP_BIN_DIR)) mkdirSync(YTDLP_BIN_DIR, { recursive: true });
+
+if (process.env.YTDLP_COOKIES_TXT) {
+  try {
+    YTDLP_COOKIES_PATH = path.join(YTDLP_BIN_DIR, 'cookies.txt');
+    writeFileSync(YTDLP_COOKIES_PATH, process.env.YTDLP_COOKIES_TXT.trim() + '\n');
+    console.log('🍪 yt-dlp cookies file written from YTDLP_COOKIES_TXT');
+  } catch (err) {
+    console.error('❌ Failed to write yt-dlp cookies file from YTDLP_COOKIES_TXT:', err.message);
+  }
+} else if (process.env.YOUTUBE_COOKIE) {
   try {
     const pairs = process.env.YOUTUBE_COOKIE.split(';').map((p) => p.trim()).filter(Boolean);
     const lines = ['# Netscape HTTP Cookie File'];
@@ -123,13 +146,14 @@ if (process.env.YOUTUBE_COOKIE) {
       // domain  includeSubdomains  path  secure  expiry(0=session)  name  value
       lines.push(['.youtube.com', 'TRUE', '/', 'TRUE', '0', name, value].join('\t'));
     }
-    if (!existsSync(YTDLP_BIN_DIR)) mkdirSync(YTDLP_BIN_DIR, { recursive: true });
     YTDLP_COOKIES_PATH = path.join(YTDLP_BIN_DIR, 'cookies.txt');
     writeFileSync(YTDLP_COOKIES_PATH, lines.join('\n') + '\n');
-    console.log('🍪 yt-dlp cookies file generated from YOUTUBE_COOKIE');
+    console.log('🍪 yt-dlp cookies file generated from YOUTUBE_COOKIE (fallback — consider setting YTDLP_COOKIES_TXT instead for a fuller cookie set)');
   } catch (err) {
     console.error('❌ Failed to build yt-dlp cookies file:', err.message);
   }
+} else {
+  console.log('ℹ️  No cookies configured for yt-dlp streaming (set YTDLP_COOKIES_TXT).');
 }
 
 // Spotify link resolution — spotify-url-info scrapes the public embed page,
@@ -812,7 +836,21 @@ function ytDlpAudioStream(url) {
     '--no-part',
   ];
   if (YTDLP_COOKIES_PATH) args.push('--cookies', YTDLP_COOKIES_PATH);
-  return ytDlpWrap.execStream(args);
+  const stream = ytDlpWrap.execStream(args);
+
+  // Node's EventEmitter throws an UNCAUGHT exception (crashing the whole
+  // process) if an 'error' event fires with zero listeners attached at
+  // that moment. streamWithRetry below attaches short-lived listeners
+  // that detach once the stream is considered "settled" (first data, or
+  // close) — but yt-dlp can still emit a late 'error' afterwards (e.g. the
+  // process exits non-zero right around the same time 'close' fires).
+  // This permanent listener guarantees there's always at least one, so a
+  // late/duplicate error just gets logged instead of taking the bot down.
+  stream.on('error', (err) => {
+    console.error('yt-dlp stream error (post-settle, non-fatal):', err?.message || err);
+  });
+
+  return stream;
 }
 
 // Wraps ytDlpAudioStream with a retry: if yt-dlp fails immediately (bad
