@@ -1,19 +1,24 @@
 {
-  "name": "par-mod-bot",
-  "version": "1.0.0",
-  "private": true,
+  "name": "par-bot",
+  "version": "2.0.0",
+  "description": "PAR Discord moderation, shift-management, and music bot",
   "type": "module",
+  "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "discord.js": "^14.16.3",
+    "opusscript": "^0.1.1",
+    "@discordjs/voice": "^0.19.0",
+    "discord.js": "^14.15.3",
     "dotenv": "^16.4.5",
-    "express": "^4.21.1",
-    "firebase": "^10.12.0"
+    "express": "^4.19.2",
+    "ffmpeg-static": "^5.2.0",
+    "firebase-admin": "^12.3.0",
+    "libsodium-wrappers": "^0.7.13",
+    "play-dl": "^1.9.7"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.0.0"
   }
 }
