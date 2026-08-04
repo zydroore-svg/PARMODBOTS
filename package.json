@@ -17,6 +17,7 @@
     "ffmpeg-static": "^5.2.0",
     "firebase-admin": "^12.6.0",
     "play-dl": "^1.9.7",
-    "spotify-url-info": "^3.3.1"
+    "spotify-url-info": "^3.3.1",
+    "yt-dlp-wrap": "^2.3.12"
   }
 }
