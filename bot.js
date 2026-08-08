@@ -47,7 +47,12 @@ if (missing.length) {
 // reset when the bot restarts, which keeps your Firestore usage completely
 // unaffected by how much people chat with it.
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const SAFEPLACE_MODEL = process.env.SAFEPLACE_MODEL || 'llama-3.3-70b-versatile';
+// NOTE: Groq deprecated "llama-3.3-70b-versatile" (announced 2026-06-17).
+// Calls to it now fail with a model_decommissioned error, which is what was
+// causing every /safeplace reply to fall back to the generic "something
+// went quiet" message. Defaulting to a currently-supported model instead.
+// Override via SAFEPLACE_MODEL if you want a different one.
+const SAFEPLACE_MODEL = process.env.SAFEPLACE_MODEL || 'openai/gpt-oss-120b';
 const SAFEPLACE_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // How many turns (user+assistant pairs) to keep in memory per person, so
 // context doesn't grow forever and stay cheap on tokens.
