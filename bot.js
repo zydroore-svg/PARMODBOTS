@@ -9,15 +9,20 @@ import 'dotenv/config';
 import {
   Client,
   GatewayIntentBits,
+  Partials,
   ActionRowBuilder,
   EmbedBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   PermissionFlagsBits,
   ChannelType,
 } from 'discord.js';
 
 import admin from 'firebase-admin';
+import Filter from 'bad-words';
 
 // ── 1. ENV VALIDATION ────────────────────────────────────────
 const {
@@ -35,6 +40,38 @@ const missing = Object.entries(REQUIRED).filter(([, v]) => !v).map(([k]) => k);
 if (missing.length) {
   console.error('Missing required environment variables:', missing.join(', '));
   process.exit(1);
+}
+
+// ── SafePlace config ─────────────────────────────────────────
+// SafePlace never touches Firebase — it lives entirely in memory. Sessions
+// reset when the bot restarts, which keeps your Firestore usage completely
+// unaffected by how much people chat with it.
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const SAFEPLACE_MODEL = process.env.SAFEPLACE_MODEL || 'llama-3.3-70b-versatile';
+const SAFEPLACE_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+// How many turns (user+assistant pairs) to keep in memory per person, so
+// context doesn't grow forever and stay cheap on tokens.
+const SAFEPLACE_MAX_HISTORY = parseInt(process.env.SAFEPLACE_MAX_HISTORY, 10) || 20;
+// Auto-clear a session after this many minutes of inactivity, so idle DMs
+// don't sit in memory forever.
+const SAFEPLACE_SESSION_TIMEOUT_MINUTES = parseFloat(process.env.SAFEPLACE_SESSION_TIMEOUT_MINUTES) || 60;
+
+if (!GROQ_API_KEY) {
+  console.warn('GROQ_API_KEY is not set — /safeplace will reply with an error until it is configured.');
+}
+
+// ── Freedom Wall config ──────────────────────────────────────
+// Freedom Wall also lives entirely in memory (no Firebase): the confession
+// counter and the pending-review queue reset on restart. Approved posts live
+// permanently in Discord itself (the wall channel), which is the actual
+// record — nothing needs a database here.
+const FREEDOM_WALL_CHANNEL_ID = process.env.FREEDOM_WALL_CHANNEL_ID;
+const FREEDOM_WALL_REVIEW_CHANNEL_ID = process.env.FREEDOM_WALL_REVIEW_CHANNEL_ID;
+const FREEDOM_WALL_COOLDOWN_MINUTES = parseFloat(process.env.FREEDOM_WALL_COOLDOWN_MINUTES) || 10;
+const FREEDOM_WALL_MAX_LENGTH = parseInt(process.env.FREEDOM_WALL_MAX_LENGTH, 10) || 1000;
+
+if (!FREEDOM_WALL_CHANNEL_ID || !FREEDOM_WALL_REVIEW_CHANNEL_ID) {
+  console.warn('FREEDOM_WALL_CHANNEL_ID and/or FREEDOM_WALL_REVIEW_CHANNEL_ID not set — /confess will reply with an error until both are configured.');
 }
 
 // ── Wellness check config ──────────────────────────────────────
@@ -72,6 +109,8 @@ console.log(WELLNESS_AUTO_END_SHIFT
   : 'Auto-end on strike: disabled — strikes are logged only');
 console.log(`Max pause duration: ${WELLNESS_MAX_PAUSE_MINUTES} min — paused shifts auto-end past this`);
 console.log(`Warning expiry: ${WARN_EXPIRY_DAYS} day(s) — older warnings excluded from active totals`);
+console.log(`SafePlace: in-memory only, model ${SAFEPLACE_MODEL}, ${SAFEPLACE_MAX_HISTORY}-message history, ${SAFEPLACE_SESSION_TIMEOUT_MINUTES} min idle timeout`);
+console.log(`Freedom Wall: in-memory only, ${FREEDOM_WALL_COOLDOWN_MINUTES} min cooldown, staff approval required`);
 
 process.on('unhandledRejection', (reason) => console.error('Unhandled promise rejection:', reason));
 process.on('uncaughtException', (err) => { console.error('Uncaught exception:', err); process.exit(1); });
@@ -108,7 +147,9 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.DirectMessages,
   ],
+  partials: [Partials.Channel, Partials.Message],
 });
 
 const COLORS = {
@@ -117,6 +158,8 @@ const COLORS = {
   warning: 0xB8860B,
   danger: 0x8B1E2A,
   info: 0x34495E,
+  safeplace: 0x8b7fd6,
+  wall: 0x5c6bc0,
 };
 
 const BRAND_FOOTER = 'PAR Staff Management';
@@ -231,6 +274,9 @@ const SLASH_COMMANDS = [
   { name: 'channelcreate', description: 'Create a new text or voice channel', options: [{ name: 'name', description: 'Channel name', type: 3, required: true }, { name: 'type', description: 'Channel type', type: 3, required: true, choices: [{ name: 'Text', value: 'text' }, { name: 'Voice', value: 'voice' }] }, { name: 'category', description: 'Parent category', type: 7, required: false }] },
   { name: 'channeldelete', description: 'Delete a channel',                 options: [{ name: 'channel', description: 'Channel to delete', type: 7, required: true }] },
   { name: 'massmove',     description: 'Move everyone from one voice channel to another', options: [{ name: 'from', description: 'Source voice channel', type: 7, required: true }, { name: 'to', description: 'Destination voice channel', type: 7, required: true }] },
+
+  { name: 'safeplace', description: 'Start a private, supportive chat with SafePlace (sent to your DMs)' },
+  { name: 'confess',   description: 'Submit an anonymous confession to the Freedom Wall (goes to staff review first)' },
 ];
 
 client.once('ready', async () => {
@@ -247,6 +293,7 @@ client.once('ready', async () => {
   }
   setInterval(runWellnessCheck, WELLNESS_POLL_MS);
   runWellnessCheck();
+  setInterval(cleanupIdleSafeplaceSessions, 5 * 60 * 1000);
 });
 
 client.login(DISCORD_BOT_TOKEN).catch((err) => {
@@ -888,6 +935,247 @@ async function applyShiftAction(guildId, targetUserId, targetUsername, action) {
   return { ok: false, message: 'Unrecognized action.' };
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  SAFEPLACE — in-memory supportive DM companion (no Firebase)
+// ═══════════════════════════════════════════════════════════════
+
+// userId -> { history: [{role, content}], lastActive: number }
+const safeplaceSessions = new Map();
+
+const SAFEPLACE_SYSTEM_PROMPT = `You are SafePlace — a warm, supportive, completely casual companion built into a Discord server. You're DMing with someone who wants a relaxed, private space to talk through their thoughts.
+
+STRICT CONVERSATIONAL RULES:
+1. MATCH THEIR VIBE FIRST: If they just say "hi" or chat casually, greet them normally (e.g. "Hey! Good to see you. What's on your mind?"). Don't start deeply validating feelings until they actually share something real.
+2. ONLY COMFORT WHEN VENTING: Once they share heavy emotions, stress, or a hard situation, pivot to genuine empathy. Validate naturally before offering any perspective.
+3. GROUNDED COMPANION PERSONA: Talk like a close, caring friend texting back — not a therapist, not a formal counselor, not a corporate chatbot. Never claim to have a real-world job, body, or human life.
+4. NO THERAPY-SPEAK: No clinical checklists, no diagnoses, no jargon, no flowery speeches. Everyday language only.
+5. KEEP IT SCANNABLE: Short, digestible replies — 2 to 3 brief sentences per paragraph, max 2 paragraphs. Discord messages should stay well under 300 words.
+6. CLOSE NATURALLY: End with exactly ONE casual, open-ended question that feels like real curiosity, not an intake form — unless they're just chit-chatting, in which case don't force one.
+7. You are not a licensed professional and cannot diagnose anyone. If it fits naturally, you can gently mention that talking to a real counselor or trusted person is a good idea for heavier stuff — but don't lecture about it every message.`;
+
+// Keyword net for self-harm / suicide risk — deliberately broad and simple
+// rather than clever, since false positives here are far cheaper than
+// missing a real one. On a match we short-circuit the AI reply and lead
+// with real crisis resources instead.
+const CRISIS_KEYWORDS = [
+  'kill myself', 'end my life', 'suicid', 'want to die', 'wanna die',
+  "don't want to live", 'dont want to live', 'no reason to live',
+  'hurt myself', 'self harm', 'self-harm', 'cutting myself',
+  'better off dead', 'end it all', 'not worth living',
+];
+
+function containsCrisisLanguage(text) {
+  const lower = text.toLowerCase();
+  return CRISIS_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+function buildCrisisEmbed() {
+  return new EmbedBuilder()
+    .setColor(COLORS.danger)
+    .setTitle('Please reach out — you deserve support right now')
+    .setDescription(
+      "What you're going through matters, and you don't have to carry it alone. " +
+      'Please consider reaching out to one of these right now:'
+    )
+    .addFields(
+      { name: '🇵🇭 NCMH Crisis Hotline (Philippines, 24/7)', value: 'Landline: **1553**\nMobile: **0917-899-8727** / **0966-351-4518**' },
+      { name: 'Outside the Philippines', value: 'Please contact your local emergency number or a crisis line in your country — [findahelpline.com](https://findahelpline.com) has a directory by country.' },
+    )
+    .setFooter({ text: "I'm still here to talk too, whenever you're ready." });
+}
+
+function cleanupIdleSafeplaceSessions() {
+  const cutoff = Date.now() - SAFEPLACE_SESSION_TIMEOUT_MINUTES * 60 * 1000;
+  for (const [userId, session] of safeplaceSessions.entries()) {
+    if (session.lastActive < cutoff) safeplaceSessions.delete(userId);
+  }
+}
+
+function getOrCreateSafeplaceSession(userId) {
+  let session = safeplaceSessions.get(userId);
+  if (!session) {
+    session = { history: [], lastActive: Date.now() };
+    safeplaceSessions.set(userId, session);
+  }
+  return session;
+}
+
+function pushSafeplaceTurn(session, role, content) {
+  session.history.push({ role, content });
+  // Trim to the configured max, always keeping pairs roughly intact.
+  while (session.history.length > SAFEPLACE_MAX_HISTORY) session.history.shift();
+  session.lastActive = Date.now();
+}
+
+async function callSafeplaceAPI(history) {
+  if (!GROQ_API_KEY) {
+    throw new Error('SafePlace is not configured yet (missing GROQ_API_KEY).');
+  }
+  const res = await fetch(SAFEPLACE_API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${GROQ_API_KEY}` },
+    body: JSON.stringify({
+      model: SAFEPLACE_MODEL,
+      max_tokens: 500,
+      temperature: 0.65,
+      messages: [{ role: 'system', content: SAFEPLACE_SYSTEM_PROMPT }, ...history],
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content?.trim() || "I'm here, but I'm having trouble finding the words right now — can you try saying that again?";
+}
+
+const SAFEPLACE_MOODS = [
+  { id: 'sad',         label: '😔 Sad',         text: "I've been feeling really sad lately and I don't fully understand why." },
+  { id: 'anxious',     label: '😰 Anxious',     text: "I've been feeling anxious and I can't seem to shake it." },
+  { id: 'frustrated',  label: '😤 Frustrated',  text: "I'm feeling really frustrated right now." },
+  { id: 'overwhelmed', label: '🤯 Overwhelmed', text: "I feel completely overwhelmed and don't know where to start." },
+  { id: 'lonely',      label: '🥺 Lonely',      text: "I've been feeling really lonely even when I'm around people." },
+  { id: 'unsure',      label: '💭 Not sure',    text: "I'm not sure what I'm feeling — something just feels off." },
+];
+
+const SAFEPLACE_QUICK_REPLIES = [
+  { id: 'more',    label: 'I want to say more…' },
+  { id: 'name',    label: "Help me name what I'm feeling" },
+  { id: 'why',     label: 'Why do you think I feel this way?' },
+  { id: 'help_now', label: 'What can I do right now?' },
+];
+
+function buildSafeplaceMoodRows() {
+  const rows = [];
+  for (let i = 0; i < SAFEPLACE_MOODS.length; i += 3) {
+    const chunk = SAFEPLACE_MOODS.slice(i, i + 3);
+    rows.push(new ActionRowBuilder().addComponents(
+      chunk.map((m) => new ButtonBuilder().setCustomId(`safeplace_mood_${m.id}`).setLabel(m.label).setStyle(ButtonStyle.Secondary))
+    ));
+  }
+  return rows;
+}
+
+function buildSafeplaceQuickReplyRow() {
+  return new ActionRowBuilder().addComponents(
+    SAFEPLACE_QUICK_REPLIES.map((q) => new ButtonBuilder().setCustomId(`safeplace_qr_${q.id}`).setLabel(q.label).setStyle(ButtonStyle.Secondary))
+  );
+}
+
+function buildSafeplaceWelcomeEmbed(user) {
+  return new EmbedBuilder()
+    .setColor(COLORS.safeplace)
+    .setAuthor({ name: 'SafePlace', iconURL: client.user.displayAvatarURL() })
+    .setTitle('A quiet space to talk')
+    .setDescription(
+      `Hey ${user}, this is a private space just between us. Tell me what's on your mind, or pick a starting point below — I'm listening.`
+    )
+    .setFooter({ text: 'SafePlace is a supportive companion, not a substitute for professional care.' });
+}
+
+// Sends one AI turn: pushes the user message, calls Groq, replies in the DM
+// channel with an embed + quick-reply buttons, and handles crisis language.
+async function sendSafeplaceReply(dmChannel, userId, userText) {
+  const session = getOrCreateSafeplaceSession(userId);
+  pushSafeplaceTurn(session, 'user', userText);
+
+  if (containsCrisisLanguage(userText)) {
+    await dmChannel.send({ embeds: [buildCrisisEmbed()] }).catch(() => {});
+  }
+
+  await dmChannel.sendTyping().catch(() => {});
+
+  let replyText;
+  try {
+    replyText = await callSafeplaceAPI(session.history);
+  } catch (err) {
+    console.error('SafePlace API error:', err);
+    await dmChannel.send('Something went quiet on my end just now — mind trying that again in a moment?').catch(() => {});
+    return;
+  }
+
+  pushSafeplaceTurn(session, 'assistant', replyText);
+
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.safeplace)
+    .setAuthor({ name: 'SafePlace', iconURL: client.user.displayAvatarURL() })
+    .setDescription(replyText.slice(0, 4000));
+
+  await dmChannel.send({ embeds: [embed], components: [buildSafeplaceQuickReplyRow()] }).catch(() => {});
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  FREEDOM WALL — anonymous posts with staff approval (no Firebase)
+// ═══════════════════════════════════════════════════════════════
+
+let confessionCounter = 0;
+// confessionId -> { authorId, authorTag, text, reviewMessageId, submittedAt }
+const pendingConfessions = new Map();
+// userId -> timestamp of last submission (approved or pending)
+const confessionCooldowns = new Map();
+const wallFilter = new Filter();
+
+function nextConfessionId() {
+  confessionCounter += 1;
+  return confessionCounter;
+}
+
+function checkConfessionCooldown(userId) {
+  const last = confessionCooldowns.get(userId);
+  if (!last) return { ok: true };
+  const elapsedMs = Date.now() - last;
+  const cooldownMs = FREEDOM_WALL_COOLDOWN_MINUTES * 60 * 1000;
+  if (elapsedMs < cooldownMs) {
+    const remainingMin = Math.ceil((cooldownMs - elapsedMs) / 60000);
+    return { ok: false, remainingMin };
+  }
+  return { ok: true };
+}
+
+function buildConfessionModal() {
+  const modal = new ModalBuilder().setCustomId('confess_modal').setTitle('Freedom Wall — Confession');
+  const input = new TextInputBuilder()
+    .setCustomId('confess_text')
+    .setLabel('What do you want to say? (posted anonymously)')
+    .setStyle(TextInputStyle.Paragraph)
+    .setMinLength(3)
+    .setMaxLength(FREEDOM_WALL_MAX_LENGTH)
+    .setPlaceholder("This won't show your name. Staff review it before it's posted.")
+    .setRequired(true);
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  return modal;
+}
+
+function buildReviewEmbed(confessionId, confession, status = 'pending') {
+  const colorByStatus = { pending: COLORS.warning, approved: COLORS.success, rejected: COLORS.danger };
+  const embed = new EmbedBuilder()
+    .setColor(colorByStatus[status] || COLORS.warning)
+    .setTitle(`Confession #${confessionId} — ${status === 'pending' ? 'Pending Review' : status === 'approved' ? 'Approved' : 'Rejected'}`)
+    .setDescription(confession.text)
+    .addFields(
+      { name: 'Submitted By (staff-only)', value: `<@${confession.authorId}> (${confession.authorTag})`, inline: true },
+      { name: 'Submitted', value: `<t:${Math.floor(confession.submittedAt / 1000)}:R>`, inline: true },
+    )
+    .setFooter({ text: BRAND_FOOTER });
+  return embed;
+}
+
+function buildReviewRow(confessionId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`wall_approve_${confessionId}`).setLabel('Approve').setStyle(ButtonStyle.Success).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`wall_reject_${confessionId}`).setLabel('Reject').setStyle(ButtonStyle.Danger).setDisabled(disabled),
+  );
+}
+
+function buildWallPostEmbed(confessionId, text) {
+  return new EmbedBuilder()
+    .setColor(COLORS.wall)
+    .setAuthor({ name: `Confession #${confessionId}` })
+    .setDescription(text)
+    .setFooter({ text: 'Freedom Wall · Posted anonymously' })
+    .setTimestamp();
+}
+
 // ── 7. Interaction handler ────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
   const claimed = await claimInteraction(interaction);
@@ -896,83 +1184,227 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  if (!interaction.isChatInputCommand()) {
-    if (interaction.isButton() && interaction.customId.startsWith('shift_')) {
-      const [, action, targetUserId] = interaction.customId.split('_');
-      if (interaction.user.id !== targetUserId) {
-        return interaction.reply({ content: "This isn't your shift panel.", ephemeral: true });
-      }
+  // ── Modal submit: Freedom Wall confession ───────────────────
+  if (interaction.isModalSubmit() && interaction.customId === 'confess_modal') {
+    await interaction.deferReply({ ephemeral: true });
 
-      const guildId = interaction.guild.id;
-      try {
-        let result;
-        if (action === 'pauseresume') {
-          const shift = await getShift(guildId, targetUserId);
-          const nextAction = shift?.status === 'active' ? 'pause' : 'resume';
-          result = await applyShiftAction(guildId, targetUserId, interaction.user.username, nextAction);
-        } else {
-          result = await applyShiftAction(guildId, targetUserId, interaction.user.username, action);
-        }
-
-        if (!result.ok) {
-          return interaction.reply({ content: result.message, ephemeral: true });
-        }
-
-        const panel = await buildShiftPanel(guildId, targetUserId, interaction.user);
-        await interaction.update(panel);
-        return sendModLog(interaction.guild, panel.embeds[0], interaction.channelId);
-      } catch (err) {
-        console.error('Shift panel button error:', err);
-        const errMsg = `Something went wrong: \`${err.message}\``;
-        return interaction.reply({ content: errMsg, ephemeral: true }).catch(() => {});
-      }
+    if (!FREEDOM_WALL_CHANNEL_ID || !FREEDOM_WALL_REVIEW_CHANNEL_ID) {
+      return interaction.editReply('Freedom Wall is not configured yet — ask an admin to set FREEDOM_WALL_CHANNEL_ID and FREEDOM_WALL_REVIEW_CHANNEL_ID.');
     }
 
-    // ── Wellness check acknowledge button ─────────────────────
-    if (interaction.isButton() && interaction.customId.startsWith('wellness_ack_')) {
-      const targetId = interaction.customId.replace('wellness_ack_', '');
-      if (interaction.user.id !== targetId) {
-        return interaction.reply({ content: "This check-in isn't for you.", ephemeral: true });
-      }
-      const original = interaction.message.embeds[0];
-      const ackTs = Math.floor(Date.now() / 1000);
-
-      const embedBuilder = EmbedBuilder.from(original)
-        .setColor(COLORS.success)
-        .setFooter({ text: `Acknowledged by ${interaction.user.tag}` });
-
-      // Swap the "Respond By" countdown field (index 2, if present) for a
-      // fixed "Acknowledged" timestamp so the message shows exactly when
-      // they responded instead of continuing to count down to a deadline
-      // that no longer applies.
-      const existingFields = original.fields || [];
-      if (existingFields.length >= 3 && existingFields[2].name === 'Respond By') {
-        embedBuilder.spliceFields(2, 1, { name: 'Acknowledged', value: `<t:${ackTs}:f>`, inline: true });
-      } else {
-        embedBuilder.addFields({ name: 'Acknowledged', value: `<t:${ackTs}:f>`, inline: true });
-      }
-
-      // Clear the pending-check state so the poller stops counting toward a strike.
-      try {
-        await updateShift(GUILD_ID, targetId, {
-          pendingCheckSentAt: null,
-          pendingCheckMessageId: null,
-          pendingCheckChannelId: null,
-          lastWellnessCheckAt: Timestamp.now(),
-          updatedAt: Timestamp.now(),
-        });
-      } catch (err) {
-        console.error('Failed to clear pending wellness check on ack:', err);
-      }
-
-      return interaction.update({ embeds: [embedBuilder], components: [] });
+    const cooldown = checkConfessionCooldown(interaction.user.id);
+    if (!cooldown.ok) {
+      return interaction.editReply(`You're doing that too often — try again in about **${cooldown.remainingMin} minute(s)**.`);
     }
+
+    const rawText = interaction.fields.getTextInputValue('confess_text').trim();
+    if (!rawText) return interaction.editReply('Your confession was empty — nothing was submitted.');
+
+    if (wallFilter.isProfane(rawText)) {
+      return interaction.editReply("That message can't be submitted as written — please remove the flagged language and try again.");
+    }
+
+    const reviewChannel = interaction.guild.channels.cache.get(FREEDOM_WALL_REVIEW_CHANNEL_ID)
+      || await interaction.guild.channels.fetch(FREEDOM_WALL_REVIEW_CHANNEL_ID).catch(() => null);
+    if (!reviewChannel) return interaction.editReply('Could not reach the staff review channel — let an admin know.');
+
+    const confessionId = nextConfessionId();
+    const confession = {
+      authorId: interaction.user.id,
+      authorTag: interaction.user.tag,
+      text: rawText,
+      submittedAt: Date.now(),
+      reviewMessageId: null,
+    };
+
+    const reviewMsg = await reviewChannel.send({
+      embeds: [buildReviewEmbed(confessionId, confession, 'pending')],
+      components: [buildReviewRow(confessionId)],
+    }).catch((err) => { console.error('Failed to post confession for review:', err); return null; });
+
+    if (!reviewMsg) return interaction.editReply('Something went wrong submitting your confession — please try again.');
+
+    confession.reviewMessageId = reviewMsg.id;
+    pendingConfessions.set(confessionId, confession);
+    confessionCooldowns.set(interaction.user.id, Date.now());
+
+    return interaction.editReply(`Your confession has been submitted for staff review (**#${confessionId}**). It'll go live on the wall once approved.`);
+  }
+
+  if (!interaction.isChatInputCommand() && !interaction.isButton()) return;
+
+  // ── Button: Freedom Wall staff review ───────────────────────
+  if (interaction.isButton() && (interaction.customId.startsWith('wall_approve_') || interaction.customId.startsWith('wall_reject_'))) {
+    if (!requireStaff(interaction, PermissionFlagsBits.ManageMessages)) {
+      return interaction.reply({ content: 'You need staff permissions to review Freedom Wall posts.', ephemeral: true });
+    }
+
+    const isApprove = interaction.customId.startsWith('wall_approve_');
+    const confessionId = parseInt(interaction.customId.replace(isApprove ? 'wall_approve_' : 'wall_reject_', ''), 10);
+    const confession = pendingConfessions.get(confessionId);
+    if (!confession) {
+      return interaction.reply({ content: 'This confession is no longer pending (already reviewed or the bot restarted).', ephemeral: true });
+    }
+
+    await interaction.deferUpdate();
+
+    if (isApprove) {
+      const wallChannel = interaction.guild.channels.cache.get(FREEDOM_WALL_CHANNEL_ID)
+        || await interaction.guild.channels.fetch(FREEDOM_WALL_CHANNEL_ID).catch(() => null);
+      if (wallChannel) {
+        await wallChannel.send({ embeds: [buildWallPostEmbed(confessionId, confession.text)] }).catch((err) => console.error('Failed to post to wall:', err));
+      }
+    } else {
+      try {
+        const author = await client.users.fetch(confession.authorId);
+        await author.send(`Your Freedom Wall confession (**#${confessionId}**) was not approved by staff and won't be posted.`);
+      } catch { /* DMs may be closed — non-fatal */ }
+    }
+
+    const status = isApprove ? 'approved' : 'rejected';
+    await interaction.message.edit({
+      embeds: [buildReviewEmbed(confessionId, confession, status).setFooter({ text: `${status === 'approved' ? 'Approved' : 'Rejected'} by ${interaction.user.tag}` })],
+      components: [buildReviewRow(confessionId, true)],
+    }).catch(() => {});
+
+    pendingConfessions.delete(confessionId);
     return;
   }
+
+  // ── Button: SafePlace mood starters ─────────────────────────
+  if (interaction.isButton() && interaction.customId.startsWith('safeplace_mood_')) {
+    const moodId = interaction.customId.replace('safeplace_mood_', '');
+    const mood = SAFEPLACE_MOODS.find((m) => m.id === moodId);
+    if (!mood) return interaction.reply({ content: 'That option is no longer available — just type how you feel instead.', ephemeral: true });
+
+    await interaction.deferUpdate();
+    let dmChannel;
+    try { dmChannel = await interaction.user.createDM(); } catch { return; }
+    await dmChannel.send({ content: `**You:** ${mood.text}` }).catch(() => {});
+    return sendSafeplaceReply(dmChannel, interaction.user.id, mood.text);
+  }
+
+  // ── Button: SafePlace quick replies ──────────────────────────
+  if (interaction.isButton() && interaction.customId.startsWith('safeplace_qr_')) {
+    const qrId = interaction.customId.replace('safeplace_qr_', '');
+    const qr = SAFEPLACE_QUICK_REPLIES.find((q) => q.id === qrId);
+    if (!qr) return interaction.reply({ content: 'That option is no longer available — just type your reply instead.', ephemeral: true });
+
+    await interaction.deferUpdate();
+    let dmChannel;
+    try { dmChannel = await interaction.user.createDM(); } catch { return; }
+    await dmChannel.send({ content: `**You:** ${qr.label}` }).catch(() => {});
+    return sendSafeplaceReply(dmChannel, interaction.user.id, qr.label);
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('shift_')) {
+    const [, action, targetUserId] = interaction.customId.split('_');
+    if (interaction.user.id !== targetUserId) {
+      return interaction.reply({ content: "This isn't your shift panel.", ephemeral: true });
+    }
+
+    const guildId = interaction.guild.id;
+    try {
+      let result;
+      if (action === 'pauseresume') {
+        const shift = await getShift(guildId, targetUserId);
+        const nextAction = shift?.status === 'active' ? 'pause' : 'resume';
+        result = await applyShiftAction(guildId, targetUserId, interaction.user.username, nextAction);
+      } else {
+        result = await applyShiftAction(guildId, targetUserId, interaction.user.username, action);
+      }
+
+      if (!result.ok) {
+        return interaction.reply({ content: result.message, ephemeral: true });
+      }
+
+      const panel = await buildShiftPanel(guildId, targetUserId, interaction.user);
+      await interaction.update(panel);
+      return sendModLog(interaction.guild, panel.embeds[0], interaction.channelId);
+    } catch (err) {
+      console.error('Shift panel button error:', err);
+      const errMsg = `Something went wrong: \`${err.message}\``;
+      return interaction.reply({ content: errMsg, ephemeral: true }).catch(() => {});
+    }
+  }
+
+  // ── Wellness check acknowledge button ─────────────────────
+  if (interaction.isButton() && interaction.customId.startsWith('wellness_ack_')) {
+    const targetId = interaction.customId.replace('wellness_ack_', '');
+    if (interaction.user.id !== targetId) {
+      return interaction.reply({ content: "This check-in isn't for you.", ephemeral: true });
+    }
+    const original = interaction.message.embeds[0];
+    const ackTs = Math.floor(Date.now() / 1000);
+
+    const embedBuilder = EmbedBuilder.from(original)
+      .setColor(COLORS.success)
+      .setFooter({ text: `Acknowledged by ${interaction.user.tag}` });
+
+    // Swap the "Respond By" countdown field (index 2, if present) for a
+    // fixed "Acknowledged" timestamp so the message shows exactly when
+    // they responded instead of continuing to count down to a deadline
+    // that no longer applies.
+    const existingFields = original.fields || [];
+    if (existingFields.length >= 3 && existingFields[2].name === 'Respond By') {
+      embedBuilder.spliceFields(2, 1, { name: 'Acknowledged', value: `<t:${ackTs}:f>`, inline: true });
+    } else {
+      embedBuilder.addFields({ name: 'Acknowledged', value: `<t:${ackTs}:f>`, inline: true });
+    }
+
+    // Clear the pending-check state so the poller stops counting toward a strike.
+    try {
+      await updateShift(GUILD_ID, targetId, {
+        pendingCheckSentAt: null,
+        pendingCheckMessageId: null,
+        pendingCheckChannelId: null,
+        lastWellnessCheckAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+      });
+    } catch (err) {
+      console.error('Failed to clear pending wellness check on ack:', err);
+    }
+
+    return interaction.update({ embeds: [embedBuilder], components: [] });
+  }
+
+  if (!interaction.isChatInputCommand()) return;
 
   const cmd = interaction.commandName;
 
   try {
+
+  // ── /safeplace ───────────────────────────────────────────
+  if (cmd === 'safeplace') {
+    await interaction.deferReply({ ephemeral: true });
+    let dmChannel;
+    try {
+      dmChannel = await interaction.user.createDM();
+    } catch {
+      return interaction.editReply("I couldn't DM you — please enable direct messages from server members and try again.");
+    }
+
+    getOrCreateSafeplaceSession(interaction.user.id); // ensure a fresh session exists
+
+    await dmChannel.send({
+      embeds: [buildSafeplaceWelcomeEmbed(interaction.user)],
+      components: buildSafeplaceMoodRows(),
+    }).catch(() => null);
+
+    return interaction.editReply('Sent — check your DMs 💬');
+  }
+
+  // ── /confess ─────────────────────────────────────────────
+  if (cmd === 'confess') {
+    if (!FREEDOM_WALL_CHANNEL_ID || !FREEDOM_WALL_REVIEW_CHANNEL_ID) {
+      return interaction.reply({ content: 'Freedom Wall is not configured yet — ask an admin to set it up.', ephemeral: true });
+    }
+    const cooldown = checkConfessionCooldown(interaction.user.id);
+    if (!cooldown.ok) {
+      return interaction.reply({ content: `You're doing that too often — try again in about **${cooldown.remainingMin} minute(s)**.`, ephemeral: true });
+    }
+    return interaction.showModal(buildConfessionModal());
+  }
 
   // ── /ping ────────────────────────────────────────────────
   if (cmd === 'ping') {
@@ -1762,4 +2194,16 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ content: errMsg, ephemeral: true }).catch(() => {});
     }
   }
+});
+
+// ── 8. DM message handler — continues SafePlace conversations ──
+// Slash commands only fire once; the back-and-forth after /safeplace
+// happens as plain DM messages, so this listener picks those up.
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (message.channel.type !== ChannelType.DM) return;
+  if (!safeplaceSessions.has(message.author.id)) return; // no active session, ignore
+  if (!message.content?.trim()) return;
+
+  await sendSafeplaceReply(message.channel, message.author.id, message.content.trim());
 });
