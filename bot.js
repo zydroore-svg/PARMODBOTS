@@ -54,26 +54,32 @@ const WELLNESS_AUTO_END_SHIFT = process.env.WELLNESS_AUTO_END_SHIFT !== 'false';
 // Default 1 = the very first missed check ends the shift and wipes history.
 const WELLNESS_AUTO_END_STRIKE_THRESHOLD = parseInt(process.env.WELLNESS_AUTO_END_STRIKE_THRESHOLD, 10) || 1;
 
+// Max time a shift can sit PAUSED before it's auto-ended. Covers staff who
+// pause and forget to resume — the shift is archived normally (not a
+// wellness strike, not a history wipe), just as if they'd hit End.
+const WELLNESS_MAX_PAUSE_MINUTES = parseFloat(process.env.WELLNESS_MAX_PAUSE_MINUTES) || 120;
+const WELLNESS_MAX_PAUSE_MS = WELLNESS_MAX_PAUSE_MINUTES * 60 * 1000;
+
+// Warnings older than this are treated as "expired" for display/counting
+// purposes. They are never deleted — just excluded from active totals and
+// marked in /warnings so staff can see history is still there.
+const WARN_EXPIRY_DAYS = parseFloat(process.env.WARN_EXPIRY_DAYS) || 90;
+
 console.log(`Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
 console.log(`Response window: ${WELLNESS_RESPONSE_MINUTES} min before a missed check counts as a strike`);
 console.log(WELLNESS_AUTO_END_SHIFT
   ? `Auto-end on strike: enabled — at ${WELLNESS_AUTO_END_STRIKE_THRESHOLD} strike(s) the shift ends AND the member's entire shift history is wiped`
   : 'Auto-end on strike: disabled — strikes are logged only');
+console.log(`Max pause duration: ${WELLNESS_MAX_PAUSE_MINUTES} min — paused shifts auto-end past this`);
+console.log(`Warning expiry: ${WARN_EXPIRY_DAYS} day(s) — older warnings excluded from active totals`);
 
 process.on('unhandledRejection', (reason) => console.error('Unhandled promise rejection:', reason));
 process.on('uncaughtException', (err) => { console.error('Uncaught exception:', err); process.exit(1); });
 
 // ── 2. Firebase (Admin SDK — bypasses Firestore security rules) ─
-// IMPORTANT: the previous version used the *client* `firebase` package
-// on the server. Firestore security rules block unauthenticated
-// client-SDK access by default, which is why commands like /shift were
-// failing with "Missing or insufficient permissions". firebase-admin
-// authenticates with a service account and is meant for server use.
 let serviceAccount;
 try {
   if (FIREBASE_SERVICE_ACCOUNT_BASE64) {
-    // Preferred on env-var-only hosts (Railway, Render, etc.) — base64 has no
-    // quotes/newlines/backslashes for the platform's variable editor to mangle.
     const decoded = Buffer.from(FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf-8');
     serviceAccount = JSON.parse(decoded);
   } else if (FIREBASE_SERVICE_ACCOUNT_JSON) {
@@ -101,26 +107,21 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates, // required for /massmove to read members' voice channels
+    GatewayIntentBits.GuildVoiceStates,
   ],
 });
 
-// ── Brand palette ────────────────────────────────────────────
-// Centralized so every embed in the bot shares one consistent, professional
-// look instead of a different ad-hoc hex code per command.
 const COLORS = {
-  primary: 0x2B2D42,   // neutral slate — default/informational
-  success: 0x2E7D32,   // muted green — approvals, completions
-  warning: 0xB8860B,   // muted gold — warnings, cautions
-  danger: 0x8B1E2A,    // muted red — bans, kicks, failures
-  info: 0x34495E,      // blue-grey — reference/lookup commands
+  primary: 0x2B2D42,
+  success: 0x2E7D32,
+  warning: 0xB8860B,
+  danger: 0x8B1E2A,
+  info: 0x34495E,
 };
 
 const BRAND_FOOTER = 'PAR Staff Management';
 
-// ── Slash command definitions ─────────────────────────────────
 const SLASH_COMMANDS = [
-  // ── Moderation ──
   { name: 'warn',      description: 'Warn a user and log it to Firebase',    options: [{ name: 'user', description: 'User to warn', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: true }] },
   { name: 'warnings',  description: 'View all warnings for a user',          options: [{ name: 'user', description: 'User to check', type: 6, required: true }] },
   { name: 'clearwarn', description: 'Delete a specific warning by its ID',   options: [{ name: 'id',   description: 'Warning document ID', type: 3, required: true }] },
@@ -132,7 +133,6 @@ const SLASH_COMMANDS = [
   { name: 'untimeout', description: 'Remove a timeout from a user',          options: [{ name: 'user', description: 'User to untimeout', type: 6, required: true }] },
   { name: 'purge',     description: 'Bulk-delete messages from this channel', options: [{ name: 'amount', description: 'Number of messages (1-100)', type: 4, required: true, min_value: 1, max_value: 100 }, { name: 'user', description: 'Only delete messages from this user (optional)', type: 6, required: false }] },
 
-  // ── Shift management & wellness ──
   {
     name: 'shift',
     description: 'Manage staff on-duty shifts',
@@ -159,6 +159,15 @@ const SLASH_COMMANDS = [
         ],
       },
       { name: 'active', description: 'List everyone currently on shift', type: 1 },
+      {
+        name: 'history',
+        description: 'Show individual past shifts for a staff member',
+        type: 1,
+        options: [
+          { name: 'user', description: 'Staff member to look up (default: you)', type: 6, required: false },
+          { name: 'count', description: 'Number of shifts to show (default 10, max 25)', type: 4, required: false, min_value: 1, max_value: 25 },
+        ],
+      },
       {
         name: 'leaderboard',
         description: 'Show top staff by total shift time',
@@ -197,7 +206,6 @@ const SLASH_COMMANDS = [
     ],
   },
 
-  // ── Info & lookup ──
   { name: 'ping',       description: 'Check bot latency' },
   { name: 'userinfo',   description: 'Show info about a user',   options: [{ name: 'user', description: 'User to look up', type: 6, required: false }] },
   { name: 'serverinfo', description: 'Show server stats and info' },
@@ -207,7 +215,6 @@ const SLASH_COMMANDS = [
   { name: 'membercount', description: 'Show the current member count' },
   { name: 'botinfo',    description: 'Show bot version, uptime, and system info' },
 
-  // ── General utility ──
   { name: 'say',      description: 'Make the bot say something in a channel', options: [{ name: 'message', description: 'What to say', type: 3, required: true }, { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
   { name: 'embed',    description: 'Post a custom embed in this channel', options: [{ name: 'title', description: 'Embed title', type: 3, required: true }, { name: 'description', description: 'Embed body', type: 3, required: true }, { name: 'color', description: 'Hex color e.g. #ff0000', type: 3, required: false }] },
   { name: 'announce', description: 'Send an announcement embed to a channel', options: [{ name: 'channel', description: 'Target channel', type: 7, required: true }, { name: 'message', description: 'Announcement text', type: 3, required: true }] },
@@ -216,7 +223,6 @@ const SLASH_COMMANDS = [
   { name: 'dm',       description: 'Send a DM to a user as the bot', options: [{ name: 'user', description: 'User to DM', type: 6, required: true }, { name: 'message', description: 'Message to send', type: 3, required: true }] },
   { name: 'slowmode', description: 'Set slowmode on a channel', options: [{ name: 'seconds', description: 'Seconds (0 = off)', type: 4, required: true, min_value: 0, max_value: 21600 }, { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
 
-  // ── Admin utilities ──
   { name: 'addrole',      description: 'Add a role to a user',              options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'role', description: 'Role to add', type: 8, required: true }] },
   { name: 'removerole',   description: 'Remove a role from a user',         options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'role', description: 'Role to remove', type: 8, required: true }] },
   { name: 'nickname',     description: "Change a user's nickname",         options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'name', description: 'New nickname (omit to reset)', type: 3, required: false }] },
@@ -230,20 +236,9 @@ const SLASH_COMMANDS = [
 client.once('ready', async () => {
   console.log(`Bot ready as ${client.user.tag}`);
   try {
-    // Wipe any GLOBAL commands from a previous deploy first. If commands
-    // were ever registered globally (client.application.commands.set) in
-    // addition to this guild's commands, Discord shows BOTH copies in the
-    // command picker — that's what causes entries like "/shift active" or
-    // "/shift pause" to appear duplicated. This bot only ever wants
-    // guild-scoped commands (they also update instantly, vs. up to an hour
-    // for global ones), so we forcibly clear global commands on every boot
-    // to guarantee stragglers can't linger or come back.
     await client.application.commands.set([]);
     console.log('Cleared global slash commands (guild commands are authoritative)');
 
-    // Guild-scoped registration updates instantly (global commands can take
-    // up to an hour to propagate, which is the usual reason "new" or
-    // "changed" commands don't show up right away).
     const guild = await client.guilds.fetch(GUILD_ID);
     await guild.commands.set(SLASH_COMMANDS);
     console.log(`${SLASH_COMMANDS.length} slash commands registered to guild ${GUILD_ID}`);
@@ -251,7 +246,7 @@ client.once('ready', async () => {
     console.error('Failed to register slash commands:', err);
   }
   setInterval(runWellnessCheck, WELLNESS_POLL_MS);
-  runWellnessCheck(); // run one pass immediately on boot
+  runWellnessCheck();
 });
 
 client.login(DISCORD_BOT_TOKEN).catch((err) => {
@@ -265,10 +260,6 @@ function requireStaff(interaction, perm = PermissionFlagsBits.ManageChannels) {
   return interaction.member.permissions.has(perm);
 }
 
-// Send an action to the mod log channel. Pass the interaction's channel ID
-// as `skipChannelId` so we don't double-post when staff run a command
-// directly in the log channel — otherwise the reply and the log entry are
-// the same embed landing in the same channel back to back.
 async function sendModLog(guild, embed, skipChannelId = null) {
   const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
   if (!logChannel) return;
@@ -276,15 +267,6 @@ async function sendModLog(guild, embed, skipChannelId = null) {
   await logChannel.send({ embeds: [embed] }).catch(console.error);
 }
 
-// ── Interaction dedup lock ──────────────────────────────────────
-// Guards against the SAME interaction being handled twice, which happens
-// when two bot processes are alive at once (e.g. a local dev instance and
-// a deployed one, or an old deploy that hasn't fully shut down) — Discord
-// dispatches gateway events to every live connection for the bot token, so
-// both processes will otherwise try to answer the same command/button and
-// you get duplicate replies like two "Shift Ended" embeds back to back.
-// This claims the interaction ID in Firestore; whichever process gets
-// there first wins, the other backs off silently.
 async function claimInteraction(interaction) {
   try {
     await db.collection('processedInteractions').doc(interaction.id).create({
@@ -292,16 +274,11 @@ async function claimInteraction(interaction) {
     });
     return true;
   } catch (err) {
-    // ALREADY_EXISTS (code 6) means another instance already claimed it.
     if (err.code === 6 || err.code === 'already-exists') return false;
-    // On any other error (e.g. transient Firestore issue), fail open so a
-    // Firestore hiccup doesn't silently eat real commands.
     console.error('claimInteraction error, proceeding anyway:', err);
     return true;
   }
 }
-
-// ── Firebase helpers (firebase-admin syntax) ────────────────────
 
 async function addWarning(targetUser, moderator, reason, guildId, extra = {}) {
   const ref = await db.collection('warnings').add({
@@ -325,6 +302,22 @@ async function getWarnings(userId, guildId) {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
+// Warnings are never deleted by expiry — this just flags whether one is past
+// WARN_EXPIRY_DAYS, so active totals and /warnings can distinguish current
+// standing from long-past history.
+function isWarningExpired(warning) {
+  const createdMs = warning.createdAt?.toDate?.().getTime();
+  if (!createdMs) return false; // no timestamp yet (just-created) — treat as active
+  return Date.now() - createdMs >= WARN_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
+}
+
+function splitActiveExpiredWarnings(warnings) {
+  const active = [];
+  const expired = [];
+  for (const w of warnings) (isWarningExpired(w) ? expired : active).push(w);
+  return { active, expired };
+}
+
 async function logModAction(type, targetUser, moderator, reason, extra = {}) {
   await db.collection('modlogs').add({
     type,
@@ -339,10 +332,6 @@ async function logModAction(type, targetUser, moderator, reason, extra = {}) {
 }
 
 async function getModLogs(userId) {
-  // NOTE: this query combines a `where` with an `orderBy` on a different
-  // field, which requires a composite index. On first run Firestore will
-  // throw an error containing a direct link to auto-create that index —
-  // click it once and the query will work from then on.
   const snap = await db.collection('modlogs')
     .where('userId', '==', userId)
     .orderBy('createdAt', 'desc')
@@ -379,14 +368,14 @@ async function createShift(guildId, userId, username) {
     guildId,
     userId,
     username,
-    status: 'active',        // 'active' | 'paused' | 'ended'
+    status: 'active',
     startedAt: now,
     activeSince: now,
     lastWellnessCheckAt: now,
-    // Wellness check response tracking
     pendingCheckSentAt: null,
     pendingCheckMessageId: null,
     pendingCheckChannelId: null,
+    pausedAt: null,
     strikes: 0,
     createdAt: now,
     updatedAt: now,
@@ -405,10 +394,6 @@ async function getActiveGuildShifts(guildId) {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
-// The `shifts` collection holds one LIVE doc per user, overwritten every
-// time they hit Start on the /shift manage panel — so it can't answer "who's
-// worked the most total time." Every completed shift gets archived here
-// instead, which is what the leaderboard reads from.
 async function logCompletedShift(guildId, userId, username, startedAt, endedAt, durationMs) {
   await db.collection('shiftHistory').add({
     guildId,
@@ -421,8 +406,6 @@ async function logCompletedShift(guildId, userId, username, startedAt, endedAt, 
   });
 }
 
-// Single equality filter only (no range/orderBy) so this never needs a
-// Firestore composite index — week/month filtering happens in memory below.
 async function getShiftLeaderboard(guildId, period = 'all') {
   const snap = await db.collection('shiftHistory').where('guildId', '==', guildId).get();
 
@@ -431,7 +414,7 @@ async function getShiftLeaderboard(guildId, period = 'all') {
     : period === 'month' ? now - 30 * 24 * 60 * 60 * 1000
     : 0;
 
-  const totals = new Map(); // userId -> { username, totalMs, shiftCount }
+  const totals = new Map();
   for (const doc of snap.docs) {
     const d = doc.data();
     const endedMs = d.endedAt?.toDate?.().getTime();
@@ -450,9 +433,6 @@ async function getShiftLeaderboard(guildId, period = 'all') {
     .sort((a, b) => b.totalMs - a.totalMs);
 }
 
-// All-time stats for a single user, used to populate the /shift manage panel.
-// Equality-only filters (no orderBy), same pattern as getWarnings — no
-// composite index required.
 async function getShiftStats(guildId, userId) {
   const snap = await db.collection('shiftHistory')
     .where('guildId', '==', guildId)
@@ -470,10 +450,21 @@ async function getShiftStats(guildId, userId) {
   return { shiftCount, totalMs, avgMs: shiftCount ? totalMs / shiftCount : 0 };
 }
 
-// Deletes every document in a Firestore collection matching `guildId`, in
-// batches of 400 (comfortably under Firestore's 500-write batch limit).
-// Used by /shift wipe to reset either the live-shift board or the
-// completed-shift history that the leaderboard is built from.
+// Individual past shifts for one user (not just the aggregate totals from
+// getShiftStats) — powers /shift history. Equality-only filter, same
+// no-composite-index pattern as getShiftStats; sorted/sliced in memory.
+async function getShiftHistoryForUser(guildId, userId, limit = 10) {
+  const snap = await db.collection('shiftHistory')
+    .where('guildId', '==', guildId)
+    .where('userId', '==', userId)
+    .get();
+
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => (b.endedAt?.toDate?.().getTime() ?? 0) - (a.endedAt?.toDate?.().getTime() ?? 0))
+    .slice(0, limit);
+}
+
 async function wipeCollectionForGuild(collectionName, guildId) {
   const snap = await db.collection(collectionName).where('guildId', '==', guildId).get();
   let deleted = 0;
@@ -494,10 +485,6 @@ async function wipeCollectionForGuild(collectionName, guildId) {
   return deleted;
 }
 
-// Deletes every completed-shift record for ONE user in this guild — used as
-// a wellness-check penalty (their entire logged shift history is wiped, not
-// just the session they were on when they missed the check). Their live
-// `shifts` doc is handled separately by the caller.
 async function wipeUserShiftHistory(guildId, userId) {
   const snap = await db.collection('shiftHistory')
     .where('guildId', '==', guildId)
@@ -522,11 +509,6 @@ async function wipeUserShiftHistory(guildId, userId) {
   return deleted;
 }
 
-// Builds the embed + button row for the /shift manage panel. Buttons are
-// disabled based on current status so there's nothing invalid to click:
-// Start is only enabled when off-shift, Pause/Resume + End only when on
-// shift. Called both when the panel is first opened and again after every
-// button press, to refresh the message in place.
 async function buildShiftPanel(guildId, userId, user) {
   const [stats, liveShift] = await Promise.all([
     getShiftStats(guildId, userId),
@@ -598,8 +580,6 @@ async function buildShiftPanel(guildId, userId, user) {
   return { embeds: [embed], components: [row] };
 }
 
-// Issue a wellness-check strike — logged into the same `warnings` collection
-// so it shows up in /warnings and /modlogs like any other warning.
 async function addWellnessStrike(guildId, userId, username, reason) {
   const ref = await db.collection('warnings').add({
     userId,
@@ -618,6 +598,9 @@ async function addWellnessStrike(guildId, userId, username, reason) {
 
 async function sendWellnessCheck(channel, shift, now) {
   const startedMs = shift.startedAt?.toDate?.().getTime() ?? now;
+  // Live-updating countdown: Discord renders <t:TIMESTAMP:R> as a relative
+  // time that ticks down client-side on its own, no bot-side timer needed.
+  const deadlineTs = Math.floor((now + WELLNESS_RESPONSE_MS) / 1000);
 
   const embed = new EmbedBuilder()
     .setColor(COLORS.warning)
@@ -629,6 +612,7 @@ async function sendWellnessCheck(channel, shift, now) {
     .addFields(
       { name: 'On Shift For', value: formatDuration(now - startedMs), inline: true },
       { name: 'Status',       value: 'On Duty',                       inline: true },
+      { name: 'Respond By',   value: `<t:${deadlineTs}:R>`,           inline: true },
     )
     .setFooter({ text: 'Select the button below to confirm you are okay.' })
     .setTimestamp();
@@ -664,10 +648,6 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
   let historyWiped = 0;
 
   if (shouldAutoEnd) {
-    // Penalty for missing a wellness check: end the shift WITHOUT archiving
-    // it (no logCompletedShift call — that session earns no credit), then
-    // erase every previously logged shift for this user too. This is
-    // intentionally destructive and cannot be undone.
     const endedAtTs = Timestamp.now();
 
     await updateShift(shift.guildId, shift.userId, {
@@ -688,7 +668,7 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
       pendingCheckMessageId: null,
       pendingCheckChannelId: null,
       strikes: newStrikeCount,
-      lastWellnessCheckAt: Timestamp.now(), // restart the clock for the next check
+      lastWellnessCheckAt: Timestamp.now(),
       updatedAt: Timestamp.now(),
     });
   }
@@ -712,16 +692,26 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
   }
 
   // Disable/mark the original check message so it's clear it timed out.
+  // The "Respond By" countdown field (index 2) is replaced with a fixed
+  // "Missed" timestamp so the message doesn't keep showing a live countdown
+  // to a deadline that's already passed.
   if (shift.pendingCheckMessageId && shift.pendingCheckChannelId) {
     try {
       const oldChannel = guild.channels.cache.get(shift.pendingCheckChannelId)
         || await guild.channels.fetch(shift.pendingCheckChannelId).catch(() => null);
       const oldMsg = oldChannel && await oldChannel.messages.fetch(shift.pendingCheckMessageId).catch(() => null);
       if (oldMsg && oldMsg.embeds[0]) {
-        const failedEmbed = EmbedBuilder.from(oldMsg.embeds[0])
+        const missedTs = Math.floor(Date.now() / 1000);
+        const failedEmbedBuilder = EmbedBuilder.from(oldMsg.embeds[0])
           .setColor(COLORS.danger)
           .setFooter({ text: shouldAutoEnd ? 'No response received — strike issued, shift history wiped' : 'No response received — strike issued' });
-        await oldMsg.edit({ embeds: [failedEmbed], components: [] }).catch(() => {});
+
+        const existingFields = oldMsg.embeds[0].fields || [];
+        if (existingFields.length >= 3) {
+          failedEmbedBuilder.spliceFields(2, 1, { name: 'Deadline', value: `Missed <t:${missedTs}:R>`, inline: true });
+        }
+
+        await oldMsg.edit({ embeds: [failedEmbedBuilder], components: [] }).catch(() => {});
       }
     } catch { /* best effort */ }
   }
@@ -753,6 +743,45 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
   }
 }
 
+// Auto-ends a shift that's been PAUSED longer than WELLNESS_MAX_PAUSE_MINUTES.
+// This is treated as an ordinary shift end (archived to shiftHistory, no
+// strike, no history wipe) since forgetting to hit Resume isn't a wellness
+// failure — just a UX slip.
+async function handleExpiredPause(guild, fallbackChannel, shift) {
+  const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
+  const endedAtTs = Timestamp.now();
+  const durationMs = Date.now() - startedMs;
+
+  await updateShift(shift.guildId, shift.userId, {
+    status: 'ended',
+    endedAt: endedAtTs,
+    pausedAt: null,
+    updatedAt: Timestamp.now(),
+  });
+
+  await logCompletedShift(shift.guildId, shift.userId, shift.username, shift.startedAt, endedAtTs, durationMs)
+    .catch((err) => console.error('Failed to archive auto-ended paused shift:', err));
+
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.warning)
+    .setTitle('Shift Auto-Ended — Pause Timeout')
+    .setDescription(
+      `<@${shift.userId}>'s shift was paused for over **${WELLNESS_MAX_PAUSE_MINUTES} minute(s)** and has been automatically ended.\n\n` +
+      `Run \`/shift manage\` to clock back in.`
+    )
+    .setFooter({ text: BRAND_FOOTER })
+    .setTimestamp();
+
+  await fallbackChannel.send({ embeds: [embed] }).catch((err) => console.error('Failed to post pause-timeout notice:', err));
+
+  try {
+    const member = await guild.members.fetch(shift.userId).catch(() => null);
+    await member?.user.send(
+      `Your shift in **${guild.name}** was paused for over ${WELLNESS_MAX_PAUSE_MINUTES} minutes and has been automatically ended. Run \`/shift manage\` to clock back in.`
+    );
+  } catch { /* DMs may be closed — non-fatal */ }
+}
+
 async function runWellnessCheck() {
   try {
     const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
@@ -760,9 +789,12 @@ async function runWellnessCheck() {
     const channel = guild.channels.cache.get(WELLNESS_CHANNEL_ID) || await guild.channels.fetch(WELLNESS_CHANNEL_ID).catch(() => null);
     if (!channel) return;
 
+    // Pull both active and paused shifts in one query — active ones get the
+    // usual wellness-check logic, paused ones get checked against the
+    // max-pause timeout.
     const snap = await db.collection('shifts')
       .where('guildId', '==', GUILD_ID)
-      .where('status', '==', 'active')
+      .where('status', 'in', ['active', 'paused'])
       .get();
     if (snap.empty) return;
 
@@ -772,16 +804,22 @@ async function runWellnessCheck() {
     for (const docSnap of snap.docs) {
       const shift = { guildId: GUILD_ID, ...docSnap.data() };
 
-      // ── If a check is already outstanding, see if it timed out ──
+      if (shift.status === 'paused') {
+        const pausedMs = shift.pausedAt?.toDate?.().getTime();
+        if (pausedMs && now - pausedMs >= WELLNESS_MAX_PAUSE_MS) {
+          await handleExpiredPause(guild, channel, shift);
+        }
+        continue; // no wellness checks while paused
+      }
+
       if (shift.pendingCheckSentAt) {
         const sentMs = shift.pendingCheckSentAt?.toDate?.().getTime();
         if (sentMs && now - sentMs >= WELLNESS_RESPONSE_MS) {
           await handleFailedWellnessCheck(guild, channel, shift);
         }
-        continue; // don't send a new check while one is (or just was) pending
+        continue;
       }
 
-      // ── Otherwise, see if a new wellness check is due ──
       const checkpointMs = (shift.lastWellnessCheckAt || shift.activeSince || shift.startedAt)?.toDate?.().getTime();
       if (!checkpointMs) continue;
       if (now - checkpointMs < thresholdMs) continue;
@@ -799,8 +837,6 @@ app.get('/', (req, res) => res.json({ status: 'ok', bot: client.user?.tag ?? 'st
 app.listen(PORT || 3001, '0.0.0.0', () => console.log(`Health check listening on port ${PORT || 3001}`));
 
 // ── Shared shift-transition logic ───────────────────────────────
-// Powers both the /shift manage buttons and /shift admin, so the two paths
-// can't drift apart. Returns { ok: true } or { ok: false, message }.
 async function applyShiftAction(guildId, targetUserId, targetUsername, action) {
   const shift = await getShift(guildId, targetUserId);
 
@@ -818,11 +854,13 @@ async function applyShiftAction(guildId, targetUserId, targetUsername, action) {
     }
     if (action === 'pause') {
       if (shift.status === 'paused') return { ok: false, message: 'Shift is already paused.' };
-      await updateShift(guildId, targetUserId, { status: 'paused', updatedAt: Timestamp.now() });
+      // pausedAt marks when the max-pause-duration clock starts (see
+      // WELLNESS_MAX_PAUSE_MINUTES) so a forgotten pause doesn't run forever.
+      await updateShift(guildId, targetUserId, { status: 'paused', pausedAt: Timestamp.now(), updatedAt: Timestamp.now() });
     } else {
       if (shift.status === 'active') return { ok: false, message: 'Shift is already active.' };
       const now = Timestamp.now();
-      await updateShift(guildId, targetUserId, { status: 'active', activeSince: now, lastWellnessCheckAt: now, updatedAt: now });
+      await updateShift(guildId, targetUserId, { status: 'active', activeSince: now, lastWellnessCheckAt: now, pausedAt: null, updatedAt: now });
     }
     return { ok: true };
   }
@@ -852,8 +890,6 @@ async function applyShiftAction(guildId, targetUserId, targetUsername, action) {
 
 // ── 7. Interaction handler ────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
-  // Dedup guard — if another live process already claimed this exact
-  // interaction, stop here so we never send a duplicate reply.
   const claimed = await claimInteraction(interaction);
   if (!claimed) {
     console.warn(`Duplicate interaction ${interaction.id} ignored — another bot instance already handled it. If you keep seeing this, check for a second running process.`);
@@ -861,7 +897,6 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (!interaction.isChatInputCommand()) {
-    // ── Shift management panel buttons ─────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('shift_')) {
       const [, action, targetUserId] = interaction.customId.split('_');
       if (interaction.user.id !== targetUserId) {
@@ -870,7 +905,6 @@ client.on('interactionCreate', async (interaction) => {
 
       const guildId = interaction.guild.id;
       try {
-        const mapped = action === 'pauseresume' ? null : action; // resolved below
         let result;
         if (action === 'pauseresume') {
           const shift = await getShift(guildId, targetUserId);
@@ -901,9 +935,22 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: "This check-in isn't for you.", ephemeral: true });
       }
       const original = interaction.message.embeds[0];
-      const embed = EmbedBuilder.from(original)
+      const ackTs = Math.floor(Date.now() / 1000);
+
+      const embedBuilder = EmbedBuilder.from(original)
         .setColor(COLORS.success)
         .setFooter({ text: `Acknowledged by ${interaction.user.tag}` });
+
+      // Swap the "Respond By" countdown field (index 2, if present) for a
+      // fixed "Acknowledged" timestamp so the message shows exactly when
+      // they responded instead of continuing to count down to a deadline
+      // that no longer applies.
+      const existingFields = original.fields || [];
+      if (existingFields.length >= 3 && existingFields[2].name === 'Respond By') {
+        embedBuilder.spliceFields(2, 1, { name: 'Acknowledged', value: `<t:${ackTs}:f>`, inline: true });
+      } else {
+        embedBuilder.addFields({ name: 'Acknowledged', value: `<t:${ackTs}:f>`, inline: true });
+      }
 
       // Clear the pending-check state so the poller stops counting toward a strike.
       try {
@@ -918,19 +965,13 @@ client.on('interactionCreate', async (interaction) => {
         console.error('Failed to clear pending wellness check on ack:', err);
       }
 
-      return interaction.update({ embeds: [embed], components: [] });
+      return interaction.update({ embeds: [embedBuilder], components: [] });
     }
     return;
   }
 
   const cmd = interaction.commandName;
 
-  // Safety net: EVERY command below runs inside this try/catch. Without it,
-  // an error thrown after deferReply() (e.g. a Firestore query that needs a
-  // composite index that hasn't been created yet — see getModLogs) becomes
-  // an unhandled rejection that never calls editReply(), so Discord just
-  // shows "thinking..." until the interaction token expires ~15 minutes
-  // later. This guarantees every command either succeeds or fails visibly.
   try {
 
   // ── /ping ────────────────────────────────────────────────
@@ -1073,6 +1114,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.deferReply();
     const warnId = await addWarning(target, interaction.user, reason, interaction.guild.id);
     const allWarns = await getWarnings(target.id, interaction.guild.id);
+    const { active: activeWarns } = splitActiveExpiredWarnings(allWarns);
 
     const embed = new EmbedBuilder().setColor(COLORS.warning)
       .setTitle('Warning Issued')
@@ -1080,7 +1122,7 @@ client.on('interactionCreate', async (interaction) => {
       .addFields(
         { name: 'User',       value: `<@${target.id}> (${target.tag})`, inline: true },
         { name: 'Issued By',  value: `<@${interaction.user.id}>`,       inline: true },
-        { name: 'Total Warns', value: `${allWarns.length}`,             inline: true },
+        { name: 'Active Warns', value: `${activeWarns.length} (${allWarns.length} all-time)`, inline: true },
         { name: 'Reason',     value: reason },
         { name: 'Warning ID', value: `\`${warnId}\`` },
       )
@@ -1093,7 +1135,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const dmEmbed = new EmbedBuilder().setColor(COLORS.warning)
         .setTitle(`You have been warned in ${interaction.guild.name}`)
-        .addFields({ name: 'Reason', value: reason }, { name: 'Total Warnings', value: `${allWarns.length}` })
+        .addFields({ name: 'Reason', value: reason }, { name: 'Active Warnings', value: `${activeWarns.length}` })
         .setTimestamp();
       await target.send({ embeds: [dmEmbed] });
     } catch { /**/ }
@@ -1107,15 +1149,22 @@ client.on('interactionCreate', async (interaction) => {
     const warns = await getWarnings(target.id, interaction.guild.id);
     if (warns.length === 0) return interaction.editReply(`**${target.tag}** has no warnings.`);
 
-    const fields = warns.slice(0, 10).map((w, i) => {
+    const { active, expired } = splitActiveExpiredWarnings(warns);
+    // Show active warnings first (most relevant to current standing), then
+    // expired ones, each capped so the embed doesn't blow the field limit.
+    const sortByRecency = (a, b) => (b.createdAt?.toDate?.().getTime() ?? 0) - (a.createdAt?.toDate?.().getTime() ?? 0);
+    const ordered = [...active.sort(sortByRecency), ...expired.sort(sortByRecency)];
+
+    const fields = ordered.slice(0, 10).map((w, i) => {
       const ts = w.createdAt?.toDate ? Math.floor(w.createdAt.toDate().getTime() / 1000) : 0;
-      const tag = w.type === 'wellness_strike' ? ' (wellness)' : '';
-      return { name: `#${i + 1}${tag} — ID: \`${w.id}\``, value: `Reason: ${w.reason}\nBy: ${w.moderatorTag}\nWhen: ${ts ? `<t:${ts}:R>` : 'Unknown'}` };
+      const typeTag = w.type === 'wellness_strike' ? ' (wellness)' : '';
+      const expiredTag = isWarningExpired(w) ? ' — expired' : '';
+      return { name: `#${i + 1}${typeTag}${expiredTag} — ID: \`${w.id}\``, value: `Reason: ${w.reason}\nBy: ${w.moderatorTag}\nWhen: ${ts ? `<t:${ts}:R>` : 'Unknown'}` };
     });
 
     const embed = new EmbedBuilder().setColor(COLORS.warning)
       .setTitle(`Warnings — ${target.tag}`)
-      .setDescription(`Total: **${warns.length}**`)
+      .setDescription(`Active: **${active.length}** · Expired: **${expired.length}** · Total: **${warns.length}**\n_Warnings expire after ${WARN_EXPIRY_DAYS} days but remain on record._`)
       .addFields(fields)
       .setFooter({ text: warns.length > 10 ? `Showing 10 of ${warns.length} · ${BRAND_FOOTER}` : BRAND_FOOTER })
       .setTimestamp();
@@ -1376,6 +1425,34 @@ client.on('interactionCreate', async (interaction) => {
           .setTitle('Active Shifts')
           .setDescription(lines.join('\n'))
           .setFooter({ text: BRAND_FOOTER })
+          .setTimestamp();
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      if (sub === 'history') {
+        const target = interaction.options.getUser('user') || interaction.user;
+        // Looking up someone else's history requires the same staff
+        // permission as /shift admin; your own history is always visible.
+        if (target.id !== interaction.user.id && !requireStaff(interaction, PermissionFlagsBits.ManageChannels)) {
+          return interaction.reply({ content: 'You need staff permissions to view another member\'s shift history.', ephemeral: true });
+        }
+        const count = interaction.options.getInteger('count') || 10;
+        await interaction.deferReply();
+
+        const shifts = await getShiftHistoryForUser(guildId, target.id, count);
+        if (shifts.length === 0) return interaction.editReply(`**${target.tag}** has no completed shifts on record.`);
+
+        const lines = shifts.map((s, i) => {
+          const startedMs = s.startedAt?.toDate?.().getTime();
+          const endedTs = s.endedAt?.toDate ? Math.floor(s.endedAt.toDate().getTime() / 1000) : null;
+          const when = endedTs ? `<t:${endedTs}:f>` : 'Unknown';
+          return `**${i + 1}.** ${formatDuration(s.durationMs || 0)} — ended ${when}`;
+        });
+
+        const embed = new EmbedBuilder().setColor(COLORS.primary)
+          .setTitle(`Shift History — ${target.tag}`)
+          .setDescription(lines.join('\n'))
+          .setFooter({ text: `Showing ${shifts.length} most recent shift(s) · ${BRAND_FOOTER}` })
           .setTimestamp();
         return interaction.editReply({ embeds: [embed] });
       }
