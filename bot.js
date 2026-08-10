@@ -47,7 +47,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const SAFEPLACE_MODEL = process.env.SAFEPLACE_MODEL || 'openai/gpt-oss-120b';
 const SAFEPLACE_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const SAFEPLACE_MAX_HISTORY = parseInt(process.env.SAFEPLACE_MAX_HISTORY, 10) || 20;
-const SAFEPLACE_SESSION_TIMEOUT_MINUTES = parseFloat(process.env.SAFEPLACE_SESSION_TIMEOUT_MINUTES) || 45;
+const SAFEPLACE_SESSION_TIMEOUT_MINUTES = parseFloat(process.env.SAFEPLACE_SESSION_TIMEOUT_MINUTES) || 60;
 
 if (!GROQ_API_KEY) {
   console.warn('GROQ_API_KEY is not set — /safeplace will reply with an error until it is configured.');
@@ -65,10 +65,10 @@ if (!FREEDOM_WALL_CHANNEL_ID || !FREEDOM_WALL_REVIEW_CHANNEL_ID) {
 
 // ── Wellness check config ──────────────────────────────────────
 const WELLNESS_CHANNEL_ID = process.env.WELLNESS_CHANNEL_ID || LOG_CHANNEL_ID;
-const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 60;
+const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 2;
 const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 15;
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
-const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 5;
+const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 1;
 const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 60 * 1000;
 const WELLNESS_AUTO_END_SHIFT = process.env.WELLNESS_AUTO_END_SHIFT !== 'false';
 const WELLNESS_AUTO_END_STRIKE_THRESHOLD = parseInt(process.env.WELLNESS_AUTO_END_STRIKE_THRESHOLD, 10) || 1;
