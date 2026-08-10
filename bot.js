@@ -43,33 +43,17 @@ if (missing.length) {
 }
 
 // ── SafePlace config ─────────────────────────────────────────
-// SafePlace never touches Firebase — it lives entirely in memory. Sessions
-// reset when the bot restarts, which keeps your Firestore usage completely
-// unaffected by how much people chat with it.
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-// NOTE: Groq deprecated "llama-3.3-70b-versatile" (announced 2026-06-17).
-// Calls to it now fail with a model_decommissioned error, which is what was
-// causing every /safeplace reply to fall back to the generic "something
-// went quiet" message. Defaulting to a currently-supported model instead.
-// Override via SAFEPLACE_MODEL if you want a different one.
 const SAFEPLACE_MODEL = process.env.SAFEPLACE_MODEL || 'openai/gpt-oss-120b';
 const SAFEPLACE_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-// How many turns (user+assistant pairs) to keep in memory per person, so
-// context doesn't grow forever and stay cheap on tokens.
 const SAFEPLACE_MAX_HISTORY = parseInt(process.env.SAFEPLACE_MAX_HISTORY, 10) || 20;
-// Auto-clear a session after this many minutes of inactivity, so idle DMs
-// don't sit in memory forever.
-const SAFEPLACE_SESSION_TIMEOUT_MINUTES = parseFloat(process.env.SAFEPLACE_SESSION_TIMEOUT_MINUTES) || 60;
+const SAFEPLACE_SESSION_TIMEOUT_MINUTES = parseFloat(process.env.SAFEPLACE_SESSION_TIMEOUT_MINUTES) || 45;
 
 if (!GROQ_API_KEY) {
   console.warn('GROQ_API_KEY is not set — /safeplace will reply with an error until it is configured.');
 }
 
 // ── Freedom Wall config ──────────────────────────────────────
-// Freedom Wall also lives entirely in memory (no Firebase): the confession
-// counter and the pending-review queue reset on restart. Approved posts live
-// permanently in Discord itself (the wall channel), which is the actual
-// record — nothing needs a database here.
 const FREEDOM_WALL_CHANNEL_ID = process.env.FREEDOM_WALL_CHANNEL_ID;
 const FREEDOM_WALL_REVIEW_CHANNEL_ID = process.env.FREEDOM_WALL_REVIEW_CHANNEL_ID;
 const FREEDOM_WALL_COOLDOWN_MINUTES = parseFloat(process.env.FREEDOM_WALL_COOLDOWN_MINUTES) || 10;
@@ -84,33 +68,20 @@ const WELLNESS_CHANNEL_ID = process.env.WELLNESS_CHANNEL_ID || LOG_CHANNEL_ID;
 const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 60;
 const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 15;
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
-// How long a user has to hit "Acknowledge" before it counts as a failed check / strike.
 const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 5;
 const WELLNESS_RESPONSE_MS = WELLNESS_RESPONSE_MINUTES * 60 * 1000;
-// Whether a missed wellness check should automatically end the member's shift
-// AND permanently wipe their entire logged shift history (all past shifts,
-// not just the one in progress). Set WELLNESS_AUTO_END_SHIFT=false in .env to
-// only issue the strike and leave their shift/history untouched.
 const WELLNESS_AUTO_END_SHIFT = process.env.WELLNESS_AUTO_END_SHIFT !== 'false';
-// How many strikes (cumulative, all-time) it takes before this triggers.
-// Default 1 = the very first missed check ends the shift and wipes history.
 const WELLNESS_AUTO_END_STRIKE_THRESHOLD = parseInt(process.env.WELLNESS_AUTO_END_STRIKE_THRESHOLD, 10) || 1;
 
-// Max time a shift can sit PAUSED before it's auto-ended. Covers staff who
-// pause and forget to resume — the shift is archived normally (not a
-// wellness strike, not a history wipe), just as if they'd hit End.
 const WELLNESS_MAX_PAUSE_MINUTES = parseFloat(process.env.WELLNESS_MAX_PAUSE_MINUTES) || 120;
 const WELLNESS_MAX_PAUSE_MS = WELLNESS_MAX_PAUSE_MINUTES * 60 * 1000;
 
-// Warnings older than this are treated as "expired" for display/counting
-// purposes. They are never deleted — just excluded from active totals and
-// marked in /warnings so staff can see history is still there.
 const WARN_EXPIRY_DAYS = parseFloat(process.env.WARN_EXPIRY_DAYS) || 90;
 
 console.log(`Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
 console.log(`Response window: ${WELLNESS_RESPONSE_MINUTES} min before a missed check counts as a strike`);
 console.log(WELLNESS_AUTO_END_SHIFT
-  ? `Auto-end on strike: enabled — at ${WELLNESS_AUTO_END_STRIKE_THRESHOLD} strike(s) the shift ends AND the member's entire shift history is wiped`
+  ? `Auto-end on strike: enabled — at ${WELLNESS_AUTO_END_STRIKE_THRESHOLD} strike(s) the current shift ends and its hours are discarded`
   : 'Auto-end on strike: disabled — strikes are logged only');
 console.log(`Max pause duration: ${WELLNESS_MAX_PAUSE_MINUTES} min — paused shifts auto-end past this`);
 console.log(`Warning expiry: ${WARN_EXPIRY_DAYS} day(s) — older warnings excluded from active totals`);
@@ -120,7 +91,7 @@ console.log(`Freedom Wall: in-memory only, ${FREEDOM_WALL_COOLDOWN_MINUTES} min 
 process.on('unhandledRejection', (reason) => console.error('Unhandled promise rejection:', reason));
 process.on('uncaughtException', (err) => { console.error('Uncaught exception:', err); process.exit(1); });
 
-// ── 2. Firebase (Admin SDK — bypasses Firestore security rules) ─
+// ── 2. Firebase (Admin SDK) ──────────────────────────────────
 let serviceAccount;
 try {
   if (FIREBASE_SERVICE_ACCOUNT_BASE64) {
@@ -131,11 +102,10 @@ try {
   } else if (FIREBASE_SERVICE_ACCOUNT_PATH) {
     serviceAccount = JSON.parse(readFileSync(FIREBASE_SERVICE_ACCOUNT_PATH, 'utf-8'));
   } else {
-    throw new Error('Set FIREBASE_SERVICE_ACCOUNT_BASE64 (recommended on Railway), FIREBASE_SERVICE_ACCOUNT_JSON (stringified JSON), or FIREBASE_SERVICE_ACCOUNT_PATH (path to the key file) in your .env.');
+    throw new Error('Set FIREBASE_SERVICE_ACCOUNT_BASE64, FIREBASE_SERVICE_ACCOUNT_JSON, or FIREBASE_SERVICE_ACCOUNT_PATH in your .env.');
   }
 } catch (err) {
   console.error('Firebase service account error:', err.message);
-  console.error('   Generate one in Firebase Console -> Project Settings -> Service Accounts -> Generate new private key.');
   process.exit(1);
 }
 
@@ -354,12 +324,9 @@ async function getWarnings(userId, guildId) {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
-// Warnings are never deleted by expiry — this just flags whether one is past
-// WARN_EXPIRY_DAYS, so active totals and /warnings can distinguish current
-// standing from long-past history.
 function isWarningExpired(warning) {
   const createdMs = warning.createdAt?.toDate?.().getTime();
-  if (!createdMs) return false; // no timestamp yet (just-created) — treat as active
+  if (!createdMs) return false;
   return Date.now() - createdMs >= WARN_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
 }
 
@@ -502,9 +469,6 @@ async function getShiftStats(guildId, userId) {
   return { shiftCount, totalMs, avgMs: shiftCount ? totalMs / shiftCount : 0 };
 }
 
-// Individual past shifts for one user (not just the aggregate totals from
-// getShiftStats) — powers /shift history. Equality-only filter, same
-// no-composite-index pattern as getShiftStats; sorted/sliced in memory.
 async function getShiftHistoryForUser(guildId, userId, limit = 10) {
   const snap = await db.collection('shiftHistory')
     .where('guildId', '==', guildId)
@@ -519,30 +483,6 @@ async function getShiftHistoryForUser(guildId, userId, limit = 10) {
 
 async function wipeCollectionForGuild(collectionName, guildId) {
   const snap = await db.collection(collectionName).where('guildId', '==', guildId).get();
-  let deleted = 0;
-  let batch = db.batch();
-  let opsInBatch = 0;
-
-  for (const doc of snap.docs) {
-    batch.delete(doc.ref);
-    opsInBatch += 1;
-    deleted += 1;
-    if (opsInBatch === 400) {
-      await batch.commit();
-      batch = db.batch();
-      opsInBatch = 0;
-    }
-  }
-  if (opsInBatch > 0) await batch.commit();
-  return deleted;
-}
-
-async function wipeUserShiftHistory(guildId, userId) {
-  const snap = await db.collection('shiftHistory')
-    .where('guildId', '==', guildId)
-    .where('userId', '==', userId)
-    .get();
-
   let deleted = 0;
   let batch = db.batch();
   let opsInBatch = 0;
@@ -650,8 +590,6 @@ async function addWellnessStrike(guildId, userId, username, reason) {
 
 async function sendWellnessCheck(channel, shift, now) {
   const startedMs = shift.startedAt?.toDate?.().getTime() ?? now;
-  // Live-updating countdown: Discord renders <t:TIMESTAMP:R> as a relative
-  // time that ticks down client-side on its own, no bot-side timer needed.
   const deadlineTs = Math.floor((now + WELLNESS_RESPONSE_MS) / 1000);
 
   const embed = new EmbedBuilder()
@@ -697,11 +635,11 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
   const newStrikeCount = (shift.strikes || 0) + 1;
   const shouldAutoEnd = WELLNESS_AUTO_END_SHIFT && newStrikeCount >= WELLNESS_AUTO_END_STRIKE_THRESHOLD;
 
-  let historyWiped = 0;
-
   if (shouldAutoEnd) {
     const endedAtTs = Timestamp.now();
 
+    // Set shift status to ended without invoking logCompletedShift, effectively discarding 
+    // hours earned in this single current shift and leaving shiftHistory untouched.
     await updateShift(shift.guildId, shift.userId, {
       status: 'ended',
       endedAt: endedAtTs,
@@ -711,9 +649,6 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
       strikes: newStrikeCount,
       updatedAt: Timestamp.now(),
     });
-
-    historyWiped = await wipeUserShiftHistory(shift.guildId, shift.userId)
-      .catch((err) => { console.error('Failed to wipe shift history after strike:', err); return 0; });
   } else {
     await updateShift(shift.guildId, shift.userId, {
       pendingCheckSentAt: null,
@@ -730,23 +665,18 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
     shift.userId,
     shift.username,
     `Failed to acknowledge wellness check within ${WELLNESS_RESPONSE_MINUTES} minutes` +
-      (shouldAutoEnd ? ` — shift ended, ${historyWiped} logged shift(s) wiped` : '')
+      (shouldAutoEnd ? ' — shift ended and current shift duty hours discarded' : '')
   ).catch((err) => console.error('Failed to log wellness strike:', err));
 
   if (shouldAutoEnd) {
     await logModAction(
-      'wellness_history_wipe',
+      'wellness_shift_discard',
       { id: shift.userId, tag: shift.username },
       client.user,
-      `Entire shift history wiped after missing a wellness check (strike ${newStrikeCount})`,
-      { shiftsWiped: historyWiped }
-    ).catch((err) => console.error('Failed to log history wipe to modlogs:', err));
+      `Current active shift ended and unrecorded after missing a wellness check (strike ${newStrikeCount})`
+    ).catch((err) => console.error('Failed to log shift discard to modlogs:', err));
   }
 
-  // Disable/mark the original check message so it's clear it timed out.
-  // The "Respond By" countdown field (index 2) is replaced with a fixed
-  // "Missed" timestamp so the message doesn't keep showing a live countdown
-  // to a deadline that's already passed.
   if (shift.pendingCheckMessageId && shift.pendingCheckChannelId) {
     try {
       const oldChannel = guild.channels.cache.get(shift.pendingCheckChannelId)
@@ -756,7 +686,7 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
         const missedTs = Math.floor(Date.now() / 1000);
         const failedEmbedBuilder = EmbedBuilder.from(oldMsg.embeds[0])
           .setColor(COLORS.danger)
-          .setFooter({ text: shouldAutoEnd ? 'No response received — strike issued, shift history wiped' : 'No response received — strike issued' });
+          .setFooter({ text: shouldAutoEnd ? 'No response received — strike issued, current shift duty ended' : 'No response received — strike issued' });
 
         const existingFields = oldMsg.embeds[0].fields || [];
         if (existingFields.length >= 3) {
@@ -770,14 +700,13 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
 
   const failEmbed = new EmbedBuilder()
     .setColor(COLORS.danger)
-    .setTitle(shouldAutoEnd ? 'Wellness Check Failed — Shift History Wiped' : 'Wellness Check Failed')
+    .setTitle(shouldAutoEnd ? 'Wellness Check Failed — Current Duty Ended' : 'Wellness Check Failed')
     .setDescription(
       `<@${shift.userId}> did not respond to their wellness check within ${WELLNESS_RESPONSE_MINUTES} minute(s).` +
-      (shouldAutoEnd ? '\n\nTheir shift has ended and their entire logged shift history has been permanently deleted as a penalty.' : '')
+      (shouldAutoEnd ? '\n\nTheir current active shift duty has been automatically ended and discarded as a penalty.' : '')
     )
     .addFields(
-      { name: 'Strike Count', value: `${newStrikeCount}`, inline: true },
-      ...(shouldAutoEnd ? [{ name: 'Shifts Wiped', value: `${historyWiped}`, inline: true }] : []),
+      { name: 'Strike Count', value: `${newStrikeCount}`, inline: true }
     )
     .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
@@ -788,17 +717,13 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
     try {
       const member = await guild.members.fetch(shift.userId).catch(() => null);
       await member?.user.send(
-        `You missed a wellness check in **${guild.name}**. Your shift has ended and your entire logged shift history has been wiped as a penalty. ` +
+        `You missed a wellness check in **${guild.name}**. Your current active shift duty has been ended and discarded. ` +
         `Run \`/shift manage\` if you'd like to clock back in.`
       );
     } catch { /* DMs may be closed — non-fatal */ }
   }
 }
 
-// Auto-ends a shift that's been PAUSED longer than WELLNESS_MAX_PAUSE_MINUTES.
-// This is treated as an ordinary shift end (archived to shiftHistory, no
-// strike, no history wipe) since forgetting to hit Resume isn't a wellness
-// failure — just a UX slip.
 async function handleExpiredPause(guild, fallbackChannel, shift) {
   const startedMs = shift.startedAt?.toDate?.().getTime() ?? Date.now();
   const endedAtTs = Timestamp.now();
@@ -841,9 +766,6 @@ async function runWellnessCheck() {
     const channel = guild.channels.cache.get(WELLNESS_CHANNEL_ID) || await guild.channels.fetch(WELLNESS_CHANNEL_ID).catch(() => null);
     if (!channel) return;
 
-    // Pull both active and paused shifts in one query — active ones get the
-    // usual wellness-check logic, paused ones get checked against the
-    // max-pause timeout.
     const snap = await db.collection('shifts')
       .where('guildId', '==', GUILD_ID)
       .where('status', 'in', ['active', 'paused'])
@@ -861,7 +783,7 @@ async function runWellnessCheck() {
         if (pausedMs && now - pausedMs >= WELLNESS_MAX_PAUSE_MS) {
           await handleExpiredPause(guild, channel, shift);
         }
-        continue; // no wellness checks while paused
+        continue;
       }
 
       if (shift.pendingCheckSentAt) {
@@ -883,7 +805,7 @@ async function runWellnessCheck() {
   }
 }
 
-// ── 6. Minimal Express server (health check for hosting platforms) ──
+// ── 6. Minimal Express server ──────────────────────────────────
 const app = express();
 app.get('/', (req, res) => res.json({ status: 'ok', bot: client.user?.tag ?? 'starting' }));
 app.listen(PORT || 3001, '0.0.0.0', () => console.log(`Health check listening on port ${PORT || 3001}`));
@@ -906,8 +828,6 @@ async function applyShiftAction(guildId, targetUserId, targetUsername, action) {
     }
     if (action === 'pause') {
       if (shift.status === 'paused') return { ok: false, message: 'Shift is already paused.' };
-      // pausedAt marks when the max-pause-duration clock starts (see
-      // WELLNESS_MAX_PAUSE_MINUTES) so a forgotten pause doesn't run forever.
       await updateShift(guildId, targetUserId, { status: 'paused', pausedAt: Timestamp.now(), updatedAt: Timestamp.now() });
     } else {
       if (shift.status === 'active') return { ok: false, message: 'Shift is already active.' };
@@ -941,27 +861,22 @@ async function applyShiftAction(guildId, targetUserId, targetUsername, action) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SAFEPLACE — in-memory supportive DM companion (no Firebase)
+//  SAFEPLACE — in-memory supportive DM companion
 // ═══════════════════════════════════════════════════════════════
 
-// userId -> { history: [{role, content}], lastActive: number }
 const safeplaceSessions = new Map();
 
 const SAFEPLACE_SYSTEM_PROMPT = `You are SafePlace — a warm, supportive, completely casual companion built into a Discord server. You're DMing with someone who wants a relaxed, private space to talk through their thoughts.
 
 STRICT CONVERSATIONAL RULES:
-1. MATCH THEIR VIBE FIRST: If they just say "hi" or chat casually, greet them normally (e.g. "Hey! Good to see you. What's on your mind?"). Don't start deeply validating feelings until they actually share something real.
+1. MATCH THEIR VIBE FIRST: If they just say "hi" or chat casually, greet them normally. Don't start deeply validating feelings until they actually share something real.
 2. ONLY COMFORT WHEN VENTING: Once they share heavy emotions, stress, or a hard situation, pivot to genuine empathy. Validate naturally before offering any perspective.
 3. GROUNDED COMPANION PERSONA: Talk like a close, caring friend texting back — not a therapist, not a formal counselor, not a corporate chatbot. Never claim to have a real-world job, body, or human life.
 4. NO THERAPY-SPEAK: No clinical checklists, no diagnoses, no jargon, no flowery speeches. Everyday language only.
-5. KEEP IT SCANNABLE: Short, digestible replies — 2 to 3 brief sentences per paragraph, max 2 paragraphs. Discord messages should stay well under 300 words.
-6. CLOSE NATURALLY: End with exactly ONE casual, open-ended question that feels like real curiosity, not an intake form — unless they're just chit-chatting, in which case don't force one.
-7. You are not a licensed professional and cannot diagnose anyone. If it fits naturally, you can gently mention that talking to a real counselor or trusted person is a good idea for heavier stuff — but don't lecture about it every message.`;
+5. KEEP IT SCANNABLE: Short, digestible replies — 2 to 3 brief sentences per paragraph, max 2 paragraphs.
+6. CLOSE NATURALLY: End with exactly ONE casual, open-ended question that feels like real curiosity, not an intake form.
+7. You are not a licensed professional and cannot diagnose anyone.`;
 
-// Keyword net for self-harm / suicide risk — deliberately broad and simple
-// rather than clever, since false positives here are far cheaper than
-// missing a real one. On a match we short-circuit the AI reply and lead
-// with real crisis resources instead.
 const CRISIS_KEYWORDS = [
   'kill myself', 'end my life', 'suicid', 'want to die', 'wanna die',
   "don't want to live", 'dont want to live', 'no reason to live',
@@ -1007,7 +922,6 @@ function getOrCreateSafeplaceSession(userId) {
 
 function pushSafeplaceTurn(session, role, content) {
   session.history.push({ role, content });
-  // Trim to the configured max, always keeping pairs roughly intact.
   while (session.history.length > SAFEPLACE_MAX_HISTORY) session.history.shift();
   session.lastActive = Date.now();
 }
@@ -1037,7 +951,7 @@ async function callSafeplaceAPI(history) {
 const SAFEPLACE_MOODS = [
   { id: 'sad',         label: '😔 Sad',         text: "I've been feeling really sad lately and I don't fully understand why." },
   { id: 'anxious',     label: '😰 Anxious',     text: "I've been feeling anxious and I can't seem to shake it." },
-  { id: 'frustrated',  label: '😤 Frustrated',  text: "I'm feeling really frustrated right now." },
+  { id: 'frustrated',  label: '😤 Frustrated', text: "I'm feeling really frustrated right now." },
   { id: 'overwhelmed', label: '🤯 Overwhelmed', text: "I feel completely overwhelmed and don't know where to start." },
   { id: 'lonely',      label: '🥺 Lonely',      text: "I've been feeling really lonely even when I'm around people." },
   { id: 'unsure',      label: '💭 Not sure',    text: "I'm not sure what I'm feeling — something just feels off." },
@@ -1078,8 +992,6 @@ function buildSafeplaceWelcomeEmbed(user) {
     .setFooter({ text: 'SafePlace is a supportive companion, not a substitute for professional care.' });
 }
 
-// Sends one AI turn: pushes the user message, calls Groq, replies in the DM
-// channel with an embed + quick-reply buttons, and handles crisis language.
 async function sendSafeplaceReply(dmChannel, userId, userText) {
   const session = getOrCreateSafeplaceSession(userId);
   pushSafeplaceTurn(session, 'user', userText);
@@ -1110,13 +1022,11 @@ async function sendSafeplaceReply(dmChannel, userId, userText) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  FREEDOM WALL — anonymous posts with staff approval (no Firebase)
+//  FREEDOM WALL — anonymous posts with staff approval
 // ═══════════════════════════════════════════════════════════════
 
 let confessionCounter = 0;
-// confessionId -> { authorId, authorTag, text, reviewMessageId, submittedAt }
 const pendingConfessions = new Map();
-// userId -> timestamp of last submission (approved or pending)
 const confessionCooldowns = new Map();
 const wallFilter = new Filter();
 
@@ -1184,12 +1094,8 @@ function buildWallPostEmbed(confessionId, text) {
 // ── 7. Interaction handler ────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
   const claimed = await claimInteraction(interaction);
-  if (!claimed) {
-    console.warn(`Duplicate interaction ${interaction.id} ignored — another bot instance already handled it. If you keep seeing this, check for a second running process.`);
-    return;
-  }
+  if (!claimed) return;
 
-  // ── Modal submit: Freedom Wall confession ───────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'confess_modal') {
     await interaction.deferReply({ ephemeral: true });
 
@@ -1238,7 +1144,6 @@ client.on('interactionCreate', async (interaction) => {
 
   if (!interaction.isChatInputCommand() && !interaction.isButton()) return;
 
-  // ── Button: Freedom Wall staff review ───────────────────────
   if (interaction.isButton() && (interaction.customId.startsWith('wall_approve_') || interaction.customId.startsWith('wall_reject_'))) {
     if (!requireStaff(interaction, PermissionFlagsBits.ManageMessages)) {
       return interaction.reply({ content: 'You need staff permissions to review Freedom Wall posts.', ephemeral: true });
@@ -1263,7 +1168,7 @@ client.on('interactionCreate', async (interaction) => {
       try {
         const author = await client.users.fetch(confession.authorId);
         await author.send(`Your Freedom Wall confession (**#${confessionId}**) was not approved by staff and won't be posted.`);
-      } catch { /* DMs may be closed — non-fatal */ }
+      } catch { /* DMs closed */ }
     }
 
     const status = isApprove ? 'approved' : 'rejected';
@@ -1276,7 +1181,6 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Button: SafePlace mood starters ─────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('safeplace_mood_')) {
     const moodId = interaction.customId.replace('safeplace_mood_', '');
     const mood = SAFEPLACE_MOODS.find((m) => m.id === moodId);
@@ -1289,7 +1193,6 @@ client.on('interactionCreate', async (interaction) => {
     return sendSafeplaceReply(dmChannel, interaction.user.id, mood.text);
   }
 
-  // ── Button: SafePlace quick replies ──────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('safeplace_qr_')) {
     const qrId = interaction.customId.replace('safeplace_qr_', '');
     const qr = SAFEPLACE_QUICK_REPLIES.find((q) => q.id === qrId);
@@ -1333,7 +1236,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── Wellness check acknowledge button ─────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('wellness_ack_')) {
     const targetId = interaction.customId.replace('wellness_ack_', '');
     if (interaction.user.id !== targetId) {
@@ -1346,10 +1248,6 @@ client.on('interactionCreate', async (interaction) => {
       .setColor(COLORS.success)
       .setFooter({ text: `Acknowledged by ${interaction.user.tag}` });
 
-    // Swap the "Respond By" countdown field (index 2, if present) for a
-    // fixed "Acknowledged" timestamp so the message shows exactly when
-    // they responded instead of continuing to count down to a deadline
-    // that no longer applies.
     const existingFields = original.fields || [];
     if (existingFields.length >= 3 && existingFields[2].name === 'Respond By') {
       embedBuilder.spliceFields(2, 1, { name: 'Acknowledged', value: `<t:${ackTs}:f>`, inline: true });
@@ -1357,7 +1255,6 @@ client.on('interactionCreate', async (interaction) => {
       embedBuilder.addFields({ name: 'Acknowledged', value: `<t:${ackTs}:f>`, inline: true });
     }
 
-    // Clear the pending-check state so the poller stops counting toward a strike.
     try {
       await updateShift(GUILD_ID, targetId, {
         pendingCheckSentAt: null,
@@ -1378,8 +1275,6 @@ client.on('interactionCreate', async (interaction) => {
   const cmd = interaction.commandName;
 
   try {
-
-  // ── /safeplace ───────────────────────────────────────────
   if (cmd === 'safeplace') {
     await interaction.deferReply({ ephemeral: true });
     let dmChannel;
@@ -1389,7 +1284,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.editReply("I couldn't DM you — please enable direct messages from server members and try again.");
     }
 
-    getOrCreateSafeplaceSession(interaction.user.id); // ensure a fresh session exists
+    getOrCreateSafeplaceSession(interaction.user.id);
 
     await dmChannel.send({
       embeds: [buildSafeplaceWelcomeEmbed(interaction.user)],
@@ -1399,7 +1294,6 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.editReply('Sent — check your DMs 💬');
   }
 
-  // ── /confess ─────────────────────────────────────────────
   if (cmd === 'confess') {
     if (!FREEDOM_WALL_CHANNEL_ID || !FREEDOM_WALL_REVIEW_CHANNEL_ID) {
       return interaction.reply({ content: 'Freedom Wall is not configured yet — ask an admin to set it up.', ephemeral: true });
@@ -1411,13 +1305,11 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.showModal(buildConfessionModal());
   }
 
-  // ── /ping ────────────────────────────────────────────────
   if (cmd === 'ping') {
     const sent = await interaction.reply({ content: 'Pinging...', fetchReply: true });
     return interaction.editReply(`**Pong.**\nBot latency: **${sent.createdTimestamp - interaction.createdTimestamp}ms** · API: **${Math.round(client.ws.ping)}ms**`);
   }
 
-  // ── /botinfo ─────────────────────────────────────────────
   if (cmd === 'botinfo') {
     const uptime = process.uptime();
     const h = Math.floor(uptime / 3600), m = Math.floor((uptime % 3600) / 60), s = Math.floor(uptime % 60);
@@ -1433,14 +1325,13 @@ client.on('interactionCreate', async (interaction) => {
         { name: 'Members',      value: `${client.guilds.cache.reduce((a, g) => a + g.memberCount, 0)}`, inline: true },
         { name: 'Commands',     value: `${SLASH_COMMANDS.length}`,                   inline: true },
         { name: 'Node.js',      value: process.version,                              inline: true },
-        { name: 'discord.js',   value: 'v14',                                        inline: true },
+        { name: 'discord.js',   value: 'v14',                                         inline: true },
       )
       .setFooter({ text: BRAND_FOOTER })
       .setTimestamp();
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
-  // ── /userinfo ────────────────────────────────────────────
   if (cmd === 'userinfo') {
     const target = interaction.options.getUser('user') || interaction.user;
     let member;
@@ -1450,12 +1341,12 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle(target.username)
       .setThumbnail(target.displayAvatarURL({ size: 256 }))
       .addFields(
-        { name: 'Tag',              value: target.tag,                                                                  inline: true },
-        { name: 'ID',               value: target.id,                                                                   inline: true },
-        { name: 'Bot',              value: target.bot ? 'Yes' : 'No',                                                  inline: true },
+        { name: 'Tag',              value: target.tag,                                                  inline: true },
+        { name: 'ID',               value: target.id,                                                   inline: true },
+        { name: 'Bot',              value: target.bot ? 'Yes' : 'No',                                   inline: true },
         { name: 'Account Created',  value: `<t:${Math.floor(target.createdTimestamp / 1000)}:R>`,                    inline: true },
         { name: 'Joined Server',    value: member ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'N/A',   inline: true },
-        { name: 'Warnings',         value: `${warns.length}`,                                                          inline: true },
+        { name: 'Warnings',         value: `${warns.length}`,                                           inline: true },
         { name: 'Roles',            value: member ? (member.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None') : 'N/A' },
       )
       .setFooter({ text: BRAND_FOOTER })
@@ -1463,7 +1354,6 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
-  // ── /serverinfo ──────────────────────────────────────────
   if (cmd === 'serverinfo') {
     const g = interaction.guild;
     await g.fetch();
@@ -1471,12 +1361,12 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle(g.name)
       .setThumbnail(g.iconURL({ size: 256 }))
       .addFields(
-        { name: 'Owner',        value: `<@${g.ownerId}>`,                                                  inline: true },
-        { name: 'ID',           value: g.id,                                                               inline: true },
+        { name: 'Owner',        value: `<@${g.ownerId}>`,                                  inline: true },
+        { name: 'ID',           value: g.id,                                               inline: true },
         { name: 'Created',      value: `<t:${Math.floor(g.createdTimestamp / 1000)}:R>`,                  inline: true },
-        { name: 'Members',      value: `${g.memberCount}`,                                                inline: true },
-        { name: 'Channels',     value: `${g.channels.cache.size}`,                                        inline: true },
-        { name: 'Roles',        value: `${g.roles.cache.size}`,                                           inline: true },
+        { name: 'Members',      value: `${g.memberCount}`,                                 inline: true },
+        { name: 'Channels',     value: `${g.channels.cache.size}`,                         inline: true },
+        { name: 'Roles',        value: `${g.roles.cache.size}`,                            inline: true },
         { name: 'Boost Level',  value: `Level ${g.premiumTier} (${g.premiumSubscriptionCount} boosts)`,  inline: true },
         { name: 'Verification', value: ['None','Low','Medium','High','Very High'][g.verificationLevel],  inline: true },
       )
@@ -1485,18 +1375,17 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ embeds: [embed] });
   }
 
-  // ── /roleinfo ────────────────────────────────────────────
   if (cmd === 'roleinfo') {
     const role = interaction.options.getRole('role');
     const perms = role.permissions.toArray().slice(0, 10).map(p => `\`${p}\``).join(', ') || 'None';
     const embed = new EmbedBuilder().setColor(role.color || COLORS.primary)
       .setTitle(role.name)
       .addFields(
-        { name: 'ID',              value: role.id,                                                       inline: true },
-        { name: 'Color',           value: role.hexColor,                                                 inline: true },
+        { name: 'ID',              value: role.id,                                                      inline: true },
+        { name: 'Color',           value: role.hexColor,                                                inline: true },
         { name: 'Position',        value: `${role.position}`,                                           inline: true },
         { name: 'Members',         value: `${role.members.size}`,                                       inline: true },
-        { name: 'Mentionable',     value: role.mentionable ? 'Yes' : 'No',                            inline: true },
+        { name: 'Mentionable',     value: role.mentionable ? 'Yes' : 'No',                                inline: true },
         { name: 'Hoisted',         value: role.hoist ? 'Yes' : 'No',                                   inline: true },
         { name: 'Created',         value: `<t:${Math.floor(role.createdTimestamp / 1000)}:R>`,          inline: true },
         { name: 'Key Permissions', value: perms },
@@ -1506,7 +1395,6 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
-  // ── /avatar ──────────────────────────────────────────────
   if (cmd === 'avatar') {
     const target = interaction.options.getUser('user') || interaction.user;
     const url = target.displayAvatarURL({ size: 1024, extension: 'png' });
@@ -1518,12 +1406,10 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ embeds: [embed] });
   }
 
-  // ── /membercount ─────────────────────────────────────────
   if (cmd === 'membercount') {
     return interaction.reply(`**${interaction.guild.name}** has **${interaction.guild.memberCount}** members.`);
   }
 
-  // ── /stats ───────────────────────────────────────────────
   if (cmd === 'stats') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
@@ -1543,7 +1429,6 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  // ── /warn ────────────────────────────────────────────────
   if (cmd === 'warn') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const target = interaction.options.getUser('user');
@@ -1578,7 +1463,6 @@ client.on('interactionCreate', async (interaction) => {
     } catch { /**/ }
   }
 
-  // ── /warnings ────────────────────────────────────────────
   if (cmd === 'warnings') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const target = interaction.options.getUser('user');
@@ -1587,8 +1471,6 @@ client.on('interactionCreate', async (interaction) => {
     if (warns.length === 0) return interaction.editReply(`**${target.tag}** has no warnings.`);
 
     const { active, expired } = splitActiveExpiredWarnings(warns);
-    // Show active warnings first (most relevant to current standing), then
-    // expired ones, each capped so the embed doesn't blow the field limit.
     const sortByRecency = (a, b) => (b.createdAt?.toDate?.().getTime() ?? 0) - (a.createdAt?.toDate?.().getTime() ?? 0);
     const ordered = [...active.sort(sortByRecency), ...expired.sort(sortByRecency)];
 
@@ -1608,7 +1490,6 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  // ── /clearwarn ───────────────────────────────────────────
   if (cmd === 'clearwarn') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const warnId = interaction.options.getString('id');
@@ -1625,7 +1506,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /modlogs ─────────────────────────────────────────────
   if (cmd === 'modlogs') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const target = interaction.options.getUser('user');
@@ -1648,7 +1528,6 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  // ── /kick ────────────────────────────────────────────────
   if (cmd === 'kick') {
     if (!requireStaff(interaction, PermissionFlagsBits.KickMembers))
       return interaction.reply({ content: 'You need the Kick Members permission.', ephemeral: true });
@@ -1677,7 +1556,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /ban ─────────────────────────────────────────────────
   if (cmd === 'ban') {
     if (!requireStaff(interaction, PermissionFlagsBits.BanMembers))
       return interaction.reply({ content: 'You need the Ban Members permission.', ephemeral: true });
@@ -1707,7 +1585,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /unban ───────────────────────────────────────────────
   if (cmd === 'unban') {
     if (!requireStaff(interaction, PermissionFlagsBits.BanMembers))
       return interaction.reply({ content: 'You need the Ban Members permission.', ephemeral: true });
@@ -1735,7 +1612,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /timeout ─────────────────────────────────────────────
   if (cmd === 'timeout') {
     if (!requireStaff(interaction, PermissionFlagsBits.ModerateMembers))
       return interaction.reply({ content: 'You need the Moderate Members permission.', ephemeral: true });
@@ -1766,7 +1642,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /untimeout ───────────────────────────────────────────
   if (cmd === 'untimeout') {
     if (!requireStaff(interaction, PermissionFlagsBits.ModerateMembers))
       return interaction.reply({ content: 'You need the Moderate Members permission.', ephemeral: true });
@@ -1788,7 +1663,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /purge ───────────────────────────────────────────────
   if (cmd === 'purge') {
     if (!requireStaff(interaction, PermissionFlagsBits.ManageMessages))
       return interaction.reply({ content: 'You need the Manage Messages permission.', ephemeral: true });
@@ -1807,7 +1681,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /shift ───────────────────────────────────────────────
   if (cmd === 'shift') {
     const sub = interaction.options.getSubcommand();
     const guildId = interaction.guild.id;
@@ -1868,8 +1741,6 @@ client.on('interactionCreate', async (interaction) => {
 
       if (sub === 'history') {
         const target = interaction.options.getUser('user') || interaction.user;
-        // Looking up someone else's history requires the same staff
-        // permission as /shift admin; your own history is always visible.
         if (target.id !== interaction.user.id && !requireStaff(interaction, PermissionFlagsBits.ManageChannels)) {
           return interaction.reply({ content: 'You need staff permissions to view another member\'s shift history.', ephemeral: true });
         }
@@ -1880,7 +1751,6 @@ client.on('interactionCreate', async (interaction) => {
         if (shifts.length === 0) return interaction.editReply(`**${target.tag}** has no completed shifts on record.`);
 
         const lines = shifts.map((s, i) => {
-          const startedMs = s.startedAt?.toDate?.().getTime();
           const endedTs = s.endedAt?.toDate ? Math.floor(s.endedAt.toDate().getTime() / 1000) : null;
           const when = endedTs ? `<t:${endedTs}:f>` : 'Unknown';
           return `**${i + 1}.** ${formatDuration(s.durationMs || 0)} — ended ${when}`;
@@ -1958,7 +1828,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /say ─────────────────────────────────────────────────
   if (cmd === 'say') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const message = interaction.options.getString('message');
@@ -1971,7 +1840,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /embed ───────────────────────────────────────────────
   if (cmd === 'embed') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const title = interaction.options.getString('title');
@@ -1983,7 +1851,6 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ content: 'Embed posted.', ephemeral: true });
   }
 
-  // ── /announce ────────────────────────────────────────────
   if (cmd === 'announce') {
     if (!requireStaff(interaction, PermissionFlagsBits.Administrator))
       return interaction.reply({ content: 'Administrators only.', ephemeral: true });
@@ -2002,7 +1869,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /poll ────────────────────────────────────────────────
   if (cmd === 'poll') {
     const question = interaction.options.getString('question');
     const optionsRaw = interaction.options.getString('options');
@@ -2027,7 +1893,6 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ content: 'Poll posted.', ephemeral: true });
   }
 
-  // ── /remind ──────────────────────────────────────────────
   if (cmd === 'remind') {
     const minutes = interaction.options.getInteger('minutes');
     const message = interaction.options.getString('message');
@@ -2041,7 +1906,6 @@ client.on('interactionCreate', async (interaction) => {
     }, minutes * 60 * 1000);
   }
 
-  // ── /dm ──────────────────────────────────────────────────
   if (cmd === 'dm') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const target = interaction.options.getUser('user');
@@ -2059,7 +1923,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /slowmode ────────────────────────────────────────────
   if (cmd === 'slowmode') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const secs = interaction.options.getInteger('seconds');
@@ -2070,7 +1933,6 @@ client.on('interactionCreate', async (interaction) => {
     } catch { return interaction.reply({ content: 'Failed.', ephemeral: true }); }
   }
 
-  // ── /addrole ─────────────────────────────────────────────
   if (cmd === 'addrole') {
     if (!requireStaff(interaction, PermissionFlagsBits.ManageRoles))
       return interaction.reply({ content: 'You need the Manage Roles permission.', ephemeral: true });
@@ -2086,7 +1948,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /removerole ──────────────────────────────────────────
   if (cmd === 'removerole') {
     if (!requireStaff(interaction, PermissionFlagsBits.ManageRoles))
       return interaction.reply({ content: 'You need the Manage Roles permission.', ephemeral: true });
@@ -2102,7 +1963,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /nickname ────────────────────────────────────────────
   if (cmd === 'nickname') {
     if (!requireStaff(interaction, PermissionFlagsBits.ManageNicknames))
       return interaction.reply({ content: 'You need the Manage Nicknames permission.', ephemeral: true });
@@ -2118,7 +1978,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /lockdown & /unlockdown ──────────────────────────────
   if (cmd === 'lockdown' || cmd === 'unlockdown') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
     const channel = interaction.options.getChannel('channel') || interaction.channel;
@@ -2134,7 +1993,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /channelcreate ───────────────────────────────────────
   if (cmd === 'channelcreate') {
     if (!requireStaff(interaction, PermissionFlagsBits.Administrator))
       return interaction.reply({ content: 'Administrators only.', ephemeral: true });
@@ -2154,7 +2012,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /channeldelete ───────────────────────────────────────
   if (cmd === 'channeldelete') {
     if (!requireStaff(interaction, PermissionFlagsBits.Administrator))
       return interaction.reply({ content: 'Administrators only.', ephemeral: true });
@@ -2169,7 +2026,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── /massmove ────────────────────────────────────────────
   if (cmd === 'massmove') {
     if (!requireStaff(interaction, PermissionFlagsBits.MoveMembers))
       return interaction.reply({ content: 'You need the Move Members permission.', ephemeral: true });
@@ -2201,13 +2057,11 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ── 8. DM message handler — continues SafePlace conversations ──
-// Slash commands only fire once; the back-and-forth after /safeplace
-// happens as plain DM messages, so this listener picks those up.
+// ── 8. DM message handler ──────────────────────────────────────
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.channel.type !== ChannelType.DM) return;
-  if (!safeplaceSessions.has(message.author.id)) return; // no active session, ignore
+  if (!safeplaceSessions.has(message.author.id)) return;
   if (!message.content?.trim()) return;
 
   await sendSafeplaceReply(message.channel, message.author.id, message.content.trim());
