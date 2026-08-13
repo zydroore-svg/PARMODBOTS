@@ -1492,13 +1492,13 @@ client.on('interactionCreate', async (interaction) => {
     const embed = new EmbedBuilder().setColor(role.color || COLORS.primary)
       .setTitle(role.name)
       .addFields(
-        { name: 'ID',              value: role.id,                               --------inline: true },
-        { name: 'Color',           value: role.hexColor,                                                inline: true },
-        { name: 'Position',        value: `${role.position}`,                                           inline: true },
-        { name: 'Members',         value: `${role.members.size}`,                                       inline: true },
-        { name: 'Mentionable',     value: role.mentionable ? 'Yes' : 'No',                                inline: true },
-        { name: 'Hoisted',         value: role.hoist ? 'Yes' : 'No',                                   inline: true },
-        { name: 'Created',         value: `<t:${Math.floor(role.createdTimestamp / 1000)}:R>`,          inline: true },
+        { name: 'ID',              value: role.id,                               inline: true },
+        { name: 'Color',           value: role.hexColor,                        inline: true },
+        { name: 'Position',        value: `${role.position}`,                   inline: true },
+        { name: 'Members',         value: `${role.members.size}`,               inline: true },
+        { name: 'Mentionable',     value: role.mentionable ? 'Yes' : 'No',        inline: true },
+        { name: 'Hoisted',         value: role.hoist ? 'Yes' : 'No',           inline: true },
+        { name: 'Created',         value: `<t:${Math.floor(role.createdTimestamp / 1000)}:R>`, inline: true },
         { name: 'Key Permissions', value: perms },
       )
       .setFooter({ text: BRAND_FOOTER })
