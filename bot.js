@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-//  PAR — Discord Bot (Moderation + Shift Management)
+//  PAR — Discord Bot (Moderation + Shift Management + Report Tracker)
 //  Run with:  node bot.js
 // ─────────────────────────────────────────────────────────────
 import express from 'express';
@@ -42,6 +42,11 @@ if (missing.length) {
   process.exit(1);
 }
 
+// Support multiple report channels for listening (Comma-separated in Railway under LOG_CHANNEL_IDS)
+const REPORT_CHANNEL_IDS = (process.env.LOG_CHANNEL_IDS || LOG_CHANNEL_ID || '')
+  .split(',')
+  .map(id => id.trim());
+
 // ── SafePlace config ─────────────────────────────────────────
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const SAFEPLACE_MODEL = process.env.SAFEPLACE_MODEL || 'openai/gpt-oss-120b';
@@ -65,7 +70,8 @@ if (!FREEDOM_WALL_CHANNEL_ID || !FREEDOM_WALL_REVIEW_CHANNEL_ID) {
 
 // ── Wellness check config ──────────────────────────────────────
 const WELLNESS_CHANNEL_ID = process.env.WELLNESS_CHANNEL_ID || LOG_CHANNEL_ID;
-const WELLNESS_CHECK_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MINUTES) || 45;
+const WELLNESS_CHECK_MIN_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MIN_MINUTES) || 30;
+const WELLNESS_CHECK_MAX_MINUTES = parseFloat(process.env.WELLNESS_CHECK_MAX_MINUTES) || 60;
 const WELLNESS_POLL_SECONDS = parseFloat(process.env.WELLNESS_POLL_SECONDS) || 15;
 const WELLNESS_POLL_MS = WELLNESS_POLL_SECONDS * 1000;
 const WELLNESS_RESPONSE_MINUTES = parseFloat(process.env.WELLNESS_RESPONSE_MINUTES) || 5;
@@ -78,7 +84,8 @@ const WELLNESS_MAX_PAUSE_MS = WELLNESS_MAX_PAUSE_MINUTES * 60 * 1000;
 
 const WARN_EXPIRY_DAYS = parseFloat(process.env.WARN_EXPIRY_DAYS) || 90;
 
-console.log(`Wellness checks: every ${WELLNESS_CHECK_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
+console.log(`Wellness checks: randomized every ${WELLNESS_CHECK_MIN_MINUTES}-${WELLNESS_CHECK_MAX_MINUTES} min of active duty, scanned every ${WELLNESS_POLL_SECONDS}s, posting in channel ${WELLNESS_CHANNEL_ID}`);
+console.log(`Report ticket listener: monitoring ${REPORT_CHANNEL_IDS.length} channel(s)`);
 console.log(`Response window: ${WELLNESS_RESPONSE_MINUTES} min before a missed check counts as a strike`);
 console.log(WELLNESS_AUTO_END_SHIFT
   ? `Auto-end on strike: enabled — at ${WELLNESS_AUTO_END_STRIKE_THRESHOLD} strike(s) the current shift ends and its hours are discarded`
@@ -140,7 +147,7 @@ const COLORS = {
 const BRAND_FOOTER = 'PAR Staff Management';
 
 const SLASH_COMMANDS = [
-  { name: 'warn',      description: 'Warn a user and log it to Firebase',    options: [{ name: 'user', description: 'User to warn', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: true }] },
+  { name: 'warn',       description: 'Warn a user and log it to Firebase',    options: [{ name: 'user', description: 'User to warn', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: true }] },
   { name: 'warnings',  description: 'View all warnings for a user',          options: [{ name: 'user', description: 'User to check', type: 6, required: true }] },
   { name: 'clearwarn', description: 'Delete a specific warning by its ID',   options: [{ name: 'id',   description: 'Warning document ID', type: 3, required: true }] },
   { name: 'modlogs',   description: 'Full moderation history for a user',    options: [{ name: 'user', description: 'User to look up', type: 6, required: true }] },
@@ -150,6 +157,12 @@ const SLASH_COMMANDS = [
   { name: 'timeout',   description: 'Timeout a user for a set duration',     options: [{ name: 'user', description: 'User to timeout', type: 6, required: true }, { name: 'minutes', description: 'Duration in minutes', type: 4, required: true, min_value: 1, max_value: 40320 }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
   { name: 'untimeout', description: 'Remove a timeout from a user',          options: [{ name: 'user', description: 'User to untimeout', type: 6, required: true }] },
   { name: 'purge',     description: 'Bulk-delete messages from this channel', options: [{ name: 'amount', description: 'Number of messages (1-100)', type: 4, required: true, min_value: 1, max_value: 100 }, { name: 'user', description: 'Only delete messages from this user (optional)', type: 6, required: false }] },
+
+  {
+    name: 'reportscount',
+    description: 'Check reports submitted by a user (weekly & total)',
+    options: [{ name: 'user', description: 'User to inspect', type: 6, required: true }]
+  },
 
   {
     name: 'shift',
@@ -278,6 +291,12 @@ client.login(DISCORD_BOT_TOKEN).catch((err) => {
 
 // ── 4. Helpers ────────────────────────────────────────────────
 
+function getRandomWellnessIntervalMs() {
+  const minMs = WELLNESS_CHECK_MIN_MINUTES * 60 * 1000;
+  const maxMs = WELLNESS_CHECK_MAX_MINUTES * 60 * 1000;
+  return Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+}
+
 function requireStaff(interaction, perm = PermissionFlagsBits.ManageChannels) {
   return interaction.member.permissions.has(perm);
 }
@@ -391,6 +410,7 @@ async function createShift(guildId, userId, username) {
     startedAt: now,
     activeSince: now,
     lastWellnessCheckAt: now,
+    nextCheckIntervalMs: getRandomWellnessIntervalMs(),
     pendingCheckSentAt: null,
     pendingCheckMessageId: null,
     pendingCheckChannelId: null,
@@ -624,6 +644,7 @@ async function sendWellnessCheck(channel, shift, now) {
 
   await updateShift(shift.guildId, shift.userId, {
     lastWellnessCheckAt: Timestamp.now(),
+    nextCheckIntervalMs: getRandomWellnessIntervalMs(),
     pendingCheckSentAt: Timestamp.now(),
     pendingCheckMessageId: sentMsg.id,
     pendingCheckChannelId: channel.id,
@@ -638,8 +659,6 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
   if (shouldAutoEnd) {
     const endedAtTs = Timestamp.now();
 
-    // Set shift status to ended without invoking logCompletedShift, effectively discarding 
-    // hours earned in this single current shift and leaving shiftHistory untouched.
     await updateShift(shift.guildId, shift.userId, {
       status: 'ended',
       endedAt: endedAtTs,
@@ -656,6 +675,7 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
       pendingCheckChannelId: null,
       strikes: newStrikeCount,
       lastWellnessCheckAt: Timestamp.now(),
+      nextCheckIntervalMs: getRandomWellnessIntervalMs(),
       updatedAt: Timestamp.now(),
     });
   }
@@ -773,7 +793,6 @@ async function runWellnessCheck() {
     if (snap.empty) return;
 
     const now = Date.now();
-    const thresholdMs = WELLNESS_CHECK_MINUTES * 60 * 1000;
 
     for (const docSnap of snap.docs) {
       const shift = { guildId: GUILD_ID, ...docSnap.data() };
@@ -796,7 +815,9 @@ async function runWellnessCheck() {
 
       const checkpointMs = (shift.lastWellnessCheckAt || shift.activeSince || shift.startedAt)?.toDate?.().getTime();
       if (!checkpointMs) continue;
-      if (now - checkpointMs < thresholdMs) continue;
+
+      const targetIntervalMs = shift.nextCheckIntervalMs || getRandomWellnessIntervalMs();
+      if (now - checkpointMs < targetIntervalMs) continue;
 
       await sendWellnessCheck(channel, shift, now);
     }
@@ -832,7 +853,7 @@ async function applyShiftAction(guildId, targetUserId, targetUsername, action) {
     } else {
       if (shift.status === 'active') return { ok: false, message: 'Shift is already active.' };
       const now = Timestamp.now();
-      await updateShift(guildId, targetUserId, { status: 'active', activeSince: now, lastWellnessCheckAt: now, pausedAt: null, updatedAt: now });
+      await updateShift(guildId, targetUserId, { status: 'active', activeSince: now, lastWellnessCheckAt: now, nextCheckIntervalMs: getRandomWellnessIntervalMs(), pausedAt: null, updatedAt: now });
     }
     return { ok: true };
   }
@@ -949,8 +970,8 @@ async function callSafeplaceAPI(history) {
 }
 
 const SAFEPLACE_MOODS = [
-  { id: 'sad',         label: '😔 Sad',         text: "I've been feeling really sad lately and I don't fully understand why." },
-  { id: 'anxious',     label: '😰 Anxious',     text: "I've been feeling anxious and I can't seem to shake it." },
+  { id: 'sad',          label: '😔 Sad',          text: "I've been feeling really sad lately and I don't fully understand why." },
+  { id: 'anxious',      label: '😰 Anxious',      text: "I've been feeling anxious and I can't seem to shake it." },
   { id: 'frustrated',  label: '😤 Frustrated', text: "I'm feeling really frustrated right now." },
   { id: 'overwhelmed', label: '🤯 Overwhelmed', text: "I feel completely overwhelmed and don't know where to start." },
   { id: 'lonely',      label: '🥺 Lonely',      text: "I've been feeling really lonely even when I'm around people." },
@@ -1261,6 +1282,7 @@ client.on('interactionCreate', async (interaction) => {
         pendingCheckMessageId: null,
         pendingCheckChannelId: null,
         lastWellnessCheckAt: Timestamp.now(),
+        nextCheckIntervalMs: getRandomWellnessIntervalMs(),
         updatedAt: Timestamp.now(),
       });
     } catch (err) {
@@ -1294,6 +1316,38 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.editReply('Sent — check your DMs 💬');
   }
 
+  if (cmd === 'reportscount') {
+    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
+
+    const target = interaction.options.getUser('user');
+    await interaction.deferReply({ ephemeral: true });
+
+    const sevenDaysAgo = Timestamp.fromDate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
+
+    // Query weekly reports
+    const weeklySnap = await db.collection('report_tickets')
+      .where('guildId', '==', interaction.guild.id)
+      .where('reporterId', '==', target.id)
+      .where('createdAt', '>=', sevenDaysAgo)
+      .get();
+
+    // Query all-time reports
+    const allTimeSnap = await db.collection('report_tickets')
+      .where('guildId', '==', interaction.guild.id)
+      .where('reporterId', '==', target.id)
+      .get();
+
+    const embed = new EmbedBuilder()
+      .setColor(COLORS.info)
+      .setTitle(`Report Submission Stats — ${target.tag}`)
+      .setThumbnail(target.displayAvatarURL())
+      .setDescription(`Reports submitted in the past 7 days: **${weeklySnap.size}**\nTotal all-time reports: **${allTimeSnap.size}**`)
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
+
+    return interaction.editReply({ embeds: [embed] });
+  }
+
   if (cmd === 'confess') {
     if (!FREEDOM_WALL_CHANNEL_ID || !FREEDOM_WALL_REVIEW_CHANNEL_ID) {
       return interaction.reply({ content: 'Freedom Wall is not configured yet — ask an admin to set it up.', ephemeral: true });
@@ -1318,7 +1372,7 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle(`${client.user.username} — Bot Info`)
       .setThumbnail(client.user.displayAvatarURL())
       .addFields(
-        { name: 'Uptime',       value: `${h}h ${m}m ${s}s`,                         inline: true },
+        { name: 'Uptime',        value: `${h}h ${m}m ${s}s`,                         inline: true },
         { name: 'API Latency',  value: `${Math.round(client.ws.ping)}ms`,             inline: true },
         { name: 'Memory',       value: `${Math.round(mem.heapUsed / 1024 / 1024)}MB`, inline: true },
         { name: 'Servers',      value: `${client.guilds.cache.size}`,                 inline: true },
@@ -1381,7 +1435,7 @@ client.on('interactionCreate', async (interaction) => {
     const embed = new EmbedBuilder().setColor(role.color || COLORS.primary)
       .setTitle(role.name)
       .addFields(
-        { name: 'ID',              value: role.id,                                                      inline: true },
+        { name: 'ID',              value: role.id,                                                       inline: true },
         { name: 'Color',           value: role.hexColor,                                                inline: true },
         { name: 'Position',        value: `${role.position}`,                                           inline: true },
         { name: 'Members',         value: `${role.members.size}`,                                       inline: true },
@@ -1442,7 +1496,7 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle('Warning Issued')
       .setThumbnail(target.displayAvatarURL())
       .addFields(
-        { name: 'User',       value: `<@${target.id}> (${target.tag})`, inline: true },
+        { name: 'User',        value: `<@${target.id}> (${target.tag})`, inline: true },
         { name: 'Issued By',  value: `<@${interaction.user.id}>`,       inline: true },
         { name: 'Active Warns', value: `${activeWarns.length} (${allWarns.length} all-time)`, inline: true },
         { name: 'Reason',     value: reason },
@@ -2057,12 +2111,39 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ── 8. DM message handler ──────────────────────────────────────
+// ── 8. Message handler (SafePlace DMs + External Bot Report Logger) ─────
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (message.channel.type !== ChannelType.DM) return;
-  if (!safeplaceSessions.has(message.author.id)) return;
-  if (!message.content?.trim()) return;
+  // SafePlace DM Handling
+  if (!message.author.bot && message.channel.type === ChannelType.DM && safeplaceSessions.has(message.author.id) && message.content?.trim()) {
+    return sendSafeplaceReply(message.channel, message.author.id, message.content.trim());
+  }
 
-  await sendSafeplaceReply(message.channel, message.author.id, message.content.trim());
+  // External Bot Ticket Tracking across all configured report channels
+  if (!REPORT_CHANNEL_IDS.includes(message.channel.id)) return;
+  if (!message.author.bot || message.author.id === client.user.id) return;
+  if (message.embeds.length === 0) return;
+
+  const embed = message.embeds[0];
+  if (embed.title && embed.title.includes('Discord Report Ticket')) {
+    const idField = embed.fields?.find(f => f.name === 'Discord ID');
+    const reporterId = idField ? idField.value.trim() : null;
+
+    if (!reporterId) return;
+
+    try {
+      await db.collection('report_tickets').doc(message.id).set({
+        guildId: message.guild.id,
+        reporterId: reporterId,
+        messageId: message.id,
+        channelId: message.channel.id,
+        channelName: message.channel.name,
+        ticketTitle: embed.title,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+
+      console.log(`Successfully logged report ticket #${message.id} from #${message.channel.name} for reporter ${reporterId}`);
+    } catch (err) {
+      console.error('Error logging report ticket:', err);
+    }
+  }
 });
