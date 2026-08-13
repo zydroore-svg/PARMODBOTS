@@ -1344,7 +1344,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.deferReply({ ephemeral: true });
 
     // 1 = Monday at 00:00 UTC (0 = Sunday, 1 = Monday, 5 = Friday, etc.)
-    const lastWeeklyReset = getFixedWeeklyResetTimestamp(1);
+    const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
 
     // Query weekly reports submitted SINCE the last fixed reset date
     const weeklySnap = await db.collection('report_tickets')
@@ -1360,7 +1360,7 @@ client.on('interactionCreate', async (interaction) => {
       .get();
 
     const resetDateObj = lastWeeklyReset.toDate();
-    const formattedResetDate = `<t:${Math.floor(resetDateObj.getTime() / 1000)}:F>`;
+    const formattedResetDate = `<t:${Math.floor(resetDateObj.getTime() / 1000)}:D>`;
 
     const embed = new EmbedBuilder()
       .setColor(COLORS.info)
