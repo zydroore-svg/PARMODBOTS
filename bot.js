@@ -1343,7 +1343,7 @@ client.on('interactionCreate', async (interaction) => {
     const target = interaction.options.getUser('user');
     await interaction.deferReply({ ephemeral: true });
 
-    // 1 = Monday at 00:00 UTC (0 = Sunday, 1 = Monday, 5 = Friday, etc.)
+    // 6 = Saturday at 00:00 UTC
     const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
 
     // Query weekly reports submitted SINCE the last fixed reset date
@@ -2168,7 +2168,26 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ── 8. Message handler (SafePlace DMs + External Bot Report Logger) ─────
+// ── 8. External Bot Report Ticket Listeners ─────────────────────
+
+// Helper: Check if embed indicates report ticket is denied/closed
+function isReportDeniedOrClosed(embed) {
+  if (!embed) return false;
+
+  // Check Status field
+  const statusField = embed.fields?.find(f => f.name === 'Status');
+  if (statusField && /denied|rejected|closed/i.test(statusField.value)) {
+    return true;
+  }
+
+  // Check Embed Title
+  if (embed.title && /denied|rejected|closed/i.test(embed.title)) {
+    return true;
+  }
+
+  return false;
+}
+
 client.on('messageCreate', async (message) => {
   // SafePlace DM Handling
   if (!message.author.bot && message.channel.type === ChannelType.DM && safeplaceSessions.has(message.author.id) && message.content?.trim()) {
@@ -2190,7 +2209,7 @@ client.on('messageCreate', async (message) => {
       if (match) reporterId = match[1];
     }
 
-    // Method 2: If not found in content, extract from the "Reporter" embed field: "@User ( 649164303915548672 )"
+    // Method 2: Extract from the "Reporter" embed field: "@User ( 649164303915548672 )"
     if (!reporterId) {
       const reporterField = embed.fields?.find(f => f.name === 'Reporter');
       if (reporterField) {
@@ -2201,6 +2220,12 @@ client.on('messageCreate', async (message) => {
 
     if (!reporterId) {
       console.warn(`Could not extract reporter ID from ticket #${message.id}`);
+      return;
+    }
+
+    // Skip saving if ticket is already denied on arrival
+    if (isReportDeniedOrClosed(embed)) {
+      console.log(`Skipping ticket #${message.id} — marked as Denied/Rejected`);
       return;
     }
 
@@ -2219,5 +2244,34 @@ client.on('messageCreate', async (message) => {
     } catch (err) {
       console.error('Error logging report ticket:', err);
     }
+  }
+});
+
+// Listener: Auto-delete ticket from Firestore if CST updates embed status to Denied/Rejected
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+  if (!REPORT_CHANNEL_IDS.includes(newMessage.channel.id)) return;
+  if (!newMessage.author?.bot || newMessage.author.id === client.user.id) return;
+  if (newMessage.embeds.length === 0) return;
+
+  const embed = newMessage.embeds[0];
+  if (isReportDeniedOrClosed(embed)) {
+    try {
+      await db.collection('report_tickets').doc(newMessage.id).delete();
+      console.log(`Removed denied/closed report ticket #${newMessage.id} from database`);
+    } catch (err) {
+      console.error(`Error removing denied ticket #${newMessage.id}:`, err);
+    }
+  }
+});
+
+// Listener: Auto-delete ticket from Firestore if ticket message gets deleted in Discord
+client.on('messageDelete', async (message) => {
+  if (!REPORT_CHANNEL_IDS.includes(message.channel.id)) return;
+
+  try {
+    await db.collection('report_tickets').doc(message.id).delete();
+    console.log(`Removed deleted report ticket message #${message.id} from database`);
+  } catch (err) {
+    console.error(`Error deleting ticket doc #${message.id}:`, err);
   }
 });
