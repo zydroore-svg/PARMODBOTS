@@ -291,6 +291,21 @@ client.login(DISCORD_BOT_TOKEN).catch((err) => {
 
 // ── 4. Helpers ────────────────────────────────────────────────
 
+// Gets the timestamp for the most recent fixed weekly reset (0 = Sunday, 1 = Monday, etc.)
+function getFixedWeeklyResetTimestamp(resetDayOfWeek = 1) {
+  const now = new Date();
+  const resetDate = new Date(now);
+
+  resetDate.setHours(0, 0, 0, 0);
+
+  const currentDay = resetDate.getDay();
+  const daysToSubtract = (currentDay - resetDayOfWeek + 7) % 7;
+  
+  resetDate.setDate(resetDate.getDate() - daysToSubtract);
+
+  return Timestamp.fromDate(resetDate);
+}
+
 function getRandomWellnessIntervalMs() {
   const minMs = WELLNESS_CHECK_MIN_MINUTES * 60 * 1000;
   const maxMs = WELLNESS_CHECK_MAX_MINUTES * 60 * 1000;
@@ -1322,13 +1337,14 @@ client.on('interactionCreate', async (interaction) => {
     const target = interaction.options.getUser('user');
     await interaction.deferReply({ ephemeral: true });
 
-    const sevenDaysAgo = Timestamp.fromDate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
+    // 1 = Monday at 00:00 UTC (0 = Sunday, 1 = Monday, 5 = Friday, etc.)
+    const lastWeeklyReset = getFixedWeeklyResetTimestamp(1);
 
-    // Query weekly reports
+    // Query weekly reports submitted SINCE the last fixed reset date
     const weeklySnap = await db.collection('report_tickets')
       .where('guildId', '==', interaction.guild.id)
       .where('reporterId', '==', target.id)
-      .where('createdAt', '>=', sevenDaysAgo)
+      .where('createdAt', '>=', lastWeeklyReset)
       .get();
 
     // Query all-time reports
@@ -1337,11 +1353,18 @@ client.on('interactionCreate', async (interaction) => {
       .where('reporterId', '==', target.id)
       .get();
 
+    const resetDateObj = lastWeeklyReset.toDate();
+    const formattedResetDate = `<t:${Math.floor(resetDateObj.getTime() / 1000)}:F>`;
+
     const embed = new EmbedBuilder()
       .setColor(COLORS.info)
       .setTitle(`Report Submission Stats — ${target.tag}`)
       .setThumbnail(target.displayAvatarURL())
-      .setDescription(`Reports submitted in the past 7 days: **${weeklySnap.size}**\nTotal all-time reports: **${allTimeSnap.size}**`)
+      .setDescription(
+        `Reports submitted this week: **${weeklySnap.size}**\n` +
+        `Total all-time reports: **${allTimeSnap.size}**\n\n` +
+        `*Weekly cycle started on: ${formattedResetDate}*`
+      )
       .setFooter({ text: BRAND_FOOTER })
       .setTimestamp();
 
