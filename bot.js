@@ -2182,10 +2182,27 @@ client.on('messageCreate', async (message) => {
 
   const embed = message.embeds[0];
   if (embed.title && embed.title.includes('Discord Report Ticket')) {
-    const idField = embed.fields?.find(f => f.name === 'Discord ID');
-    const reporterId = idField ? idField.value.trim() : null;
+    let reporterId = null;
 
-    if (!reporterId) return;
+    // Method 1: Check message content (e.g. "New report submitted by <@649164303915548672>")
+    if (message.content) {
+      const match = message.content.match(/<@!?(\d{17,19})>/);
+      if (match) reporterId = match[1];
+    }
+
+    // Method 2: If not found in content, extract from the "Reporter" embed field: "@User ( 649164303915548672 )"
+    if (!reporterId) {
+      const reporterField = embed.fields?.find(f => f.name === 'Reporter');
+      if (reporterField) {
+        const match = reporterField.value.match(/\b(\d{17,19})\b/);
+        if (match) reporterId = match[1];
+      }
+    }
+
+    if (!reporterId) {
+      console.warn(`Could not extract reporter ID from ticket #${message.id}`);
+      return;
+    }
 
     try {
       await db.collection('report_tickets').doc(message.id).set({
