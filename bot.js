@@ -165,6 +165,12 @@ const SLASH_COMMANDS = [
   },
 
   {
+    name: 'reportscountwipe',
+    description: 'Permanently wipe all saved report tickets (Admin only)',
+    options: [{ name: 'confirm', description: 'Type CONFIRM to confirm wipe', type: 3, required: true }]
+  },
+
+  {
     name: 'shift',
     description: 'Manage staff on-duty shifts',
     options: [
@@ -1371,6 +1377,34 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.editReply({ embeds: [embed] });
   }
 
+  if (cmd === 'reportscountwipe') {
+    if (!requireStaff(interaction, PermissionFlagsBits.Administrator)) {
+      return interaction.reply({ content: 'Administrators only — this permanently deletes stored report ticket data.', ephemeral: true });
+    }
+
+    const confirm = interaction.options.getString('confirm');
+    if (confirm !== 'CONFIRM') {
+      return interaction.reply({ content: 'Not confirmed. Re-run command with `confirm` set to `CONFIRM` to proceed.', ephemeral: true });
+    }
+
+    await interaction.deferReply();
+    const deletedCount = await wipeCollectionForGuild('report_tickets', interaction.guild.id);
+
+    const embed = new EmbedBuilder()
+      .setColor(COLORS.danger)
+      .setTitle('Report Ticket History Wiped')
+      .setDescription(`All stored report ticket logs for this server have been permanently cleared.`)
+      .addFields(
+        { name: 'Tickets Deleted', value: `${deletedCount}`, inline: true },
+        { name: 'Performed By',     value: `<@${interaction.user.id}>`, inline: true }
+      )
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
+    return sendModLog(interaction.guild, embed, interaction.channelId);
+  }
+
   if (cmd === 'confess') {
     if (!FREEDOM_WALL_CHANNEL_ID || !FREEDOM_WALL_REVIEW_CHANNEL_ID) {
       return interaction.reply({ content: 'Freedom Wall is not configured yet — ask an admin to set it up.', ephemeral: true });
@@ -1458,7 +1492,7 @@ client.on('interactionCreate', async (interaction) => {
     const embed = new EmbedBuilder().setColor(role.color || COLORS.primary)
       .setTitle(role.name)
       .addFields(
-        { name: 'ID',              value: role.id,                                                       inline: true },
+        { name: 'ID',              value: role.id,                               --------inline: true },
         { name: 'Color',           value: role.hexColor,                                                inline: true },
         { name: 'Position',        value: `${role.position}`,                                           inline: true },
         { name: 'Members',         value: `${role.members.size}`,                                       inline: true },
