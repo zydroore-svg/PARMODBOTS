@@ -49,8 +49,8 @@ const REPORT_CHANNEL_IDS = (process.env.LOG_CHANNEL_IDS || LOG_CHANNEL_ID || '')
   .map(id => id.trim());
 
 // ── Google Sheets config ─────────────────────────────────────
-const SPREADSHEET_ID = '1EsadsUOc1RmdwG-8lD0P-uW8JWftxS9nc9KmnkLvrVSc';
-const SHEET_NAME = 'PARMOD Staff'; // Change if your sheet tab has a different name
+const SPREADSHEET_ID = '1EaadsUOc1RmdwG-8JDDP-uW8JWRs69no9KmnkLvrVSo';
+const SHEET_NAME = 'Staff Database';
 
 // ── SafePlace config ─────────────────────────────────────────
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
