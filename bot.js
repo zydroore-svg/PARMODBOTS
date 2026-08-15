@@ -161,7 +161,7 @@ const SLASH_COMMANDS = [
   {
     name: 'reportscount',
     description: 'Check reports submitted by a user (weekly & total)',
-    options: [{ name: 'user', description: 'User to inspect', type: 6, required: true }]
+    options: [{ name: 'user', description: 'User to inspect (default: you)', type: 6, required: false }]
   },
 
   {
@@ -1337,11 +1337,10 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.editReply('Sent — check your DMs 💬');
   }
 
-  if (cmd === 'reportscount') {
-    if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
-
-    const target = interaction.options.getUser('user');
-    await interaction.deferReply({ ephemeral: true });
+ if (cmd === 'reportscount') {
+    // Default to the person running the command if no user is passed
+    const target = interaction.options.getUser('user') || interaction.user;
+    await interaction.deferReply(); // Removed ephemeral so the result is posted publicly
 
     // 6 = Saturday at 00:00 UTC
     const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
