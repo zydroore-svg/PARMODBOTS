@@ -23,6 +23,7 @@ import {
 
 import admin from 'firebase-admin';
 import Filter from 'bad-words';
+import { google } from 'googleapis';
 
 // ── 1. ENV VALIDATION ────────────────────────────────────────
 const {
@@ -46,6 +47,10 @@ if (missing.length) {
 const REPORT_CHANNEL_IDS = (process.env.LOG_CHANNEL_IDS || LOG_CHANNEL_ID || '')
   .split(',')
   .map(id => id.trim());
+
+// ── Google Sheets config ─────────────────────────────────────
+const SPREADSHEET_ID = '1EsadsUOc1RmdwG-8lD0P-uW8JWftxS9nc9KmnkLvrVSc';
+const SHEET_NAME = 'PARMOD Staff'; // Change if your sheet tab has a different name
 
 // ── SafePlace config ─────────────────────────────────────────
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
@@ -147,16 +152,16 @@ const COLORS = {
 const BRAND_FOOTER = 'PAR Staff Management';
 
 const SLASH_COMMANDS = [
-  { name: 'warn',       description: 'Warn a user and log it to Firebase',    options: [{ name: 'user', description: 'User to warn', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: true }] },
-  { name: 'warnings',  description: 'View all warnings for a user',          options: [{ name: 'user', description: 'User to check', type: 6, required: true }] },
-  { name: 'clearwarn', description: 'Delete a specific warning by its ID',   options: [{ name: 'id',   description: 'Warning document ID', type: 3, required: true }] },
-  { name: 'modlogs',   description: 'Full moderation history for a user',    options: [{ name: 'user', description: 'User to look up', type: 6, required: true }] },
-  { name: 'kick',      description: 'Kick a member from the server',         options: [{ name: 'user', description: 'User to kick', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
-  { name: 'ban',       description: 'Ban a user and log it to Firebase',     options: [{ name: 'user', description: 'User to ban', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: true }, { name: 'days', description: 'Messages to delete (days, 0-7)', type: 4, required: false, min_value: 0, max_value: 7 }] },
-  { name: 'unban',     description: 'Unban a user by their Discord ID',      options: [{ name: 'userid', description: 'Discord user ID', type: 3, required: true }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
-  { name: 'timeout',   description: 'Timeout a user for a set duration',     options: [{ name: 'user', description: 'User to timeout', type: 6, required: true }, { name: 'minutes', description: 'Duration in minutes', type: 4, required: true, min_value: 1, max_value: 40320 }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
-  { name: 'untimeout', description: 'Remove a timeout from a user',          options: [{ name: 'user', description: 'User to untimeout', type: 6, required: true }] },
-  { name: 'purge',     description: 'Bulk-delete messages from this channel', options: [{ name: 'amount', description: 'Number of messages (1-100)', type: 4, required: true, min_value: 1, max_value: 100 }, { name: 'user', description: 'Only delete messages from this user (optional)', type: 6, required: false }] },
+  { name: 'warn',        description: 'Warn a user and log it to Firebase',    options: [{ name: 'user', description: 'User to warn', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: true }] },
+  { name: 'warnings',   description: 'View all warnings for a user',          options: [{ name: 'user', description: 'User to check', type: 6, required: true }] },
+  { name: 'clearwarn',  description: 'Delete a specific warning by its ID',   options: [{ name: 'id',   description: 'Warning document ID', type: 3, required: true }] },
+  { name: 'modlogs',    description: 'Full moderation history for a user',    options: [{ name: 'user', description: 'User to look up', type: 6, required: true }] },
+  { name: 'kick',       description: 'Kick a member from the server',         options: [{ name: 'user', description: 'User to kick', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
+  { name: 'ban',        description: 'Ban a user and log it to Firebase',     options: [{ name: 'user', description: 'User to ban', type: 6, required: true }, { name: 'reason', description: 'Reason', type: 3, required: true }, { name: 'days', description: 'Messages to delete (days, 0-7)', type: 4, required: false, min_value: 0, max_value: 7 }] },
+  { name: 'unban',      description: 'Unban a user by their Discord ID',      options: [{ name: 'userid', description: 'Discord user ID', type: 3, required: true }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
+  { name: 'timeout',    description: 'Timeout a user for a set duration',     options: [{ name: 'user', description: 'User to timeout', type: 6, required: true }, { name: 'minutes', description: 'Duration in minutes', type: 4, required: true, min_value: 1, max_value: 40320 }, { name: 'reason', description: 'Reason', type: 3, required: false }] },
+  { name: 'untimeout',  description: 'Remove a timeout from a user',          options: [{ name: 'user', description: 'User to untimeout', type: 6, required: true }] },
+  { name: 'purge',      description: 'Bulk-delete messages from this channel', options: [{ name: 'amount', description: 'Number of messages (1-100)', type: 4, required: true, min_value: 1, max_value: 100 }, { name: 'user', description: 'Only delete messages from this user (optional)', type: 6, required: false }] },
 
   {
     name: 'reportscount',
@@ -168,6 +173,11 @@ const SLASH_COMMANDS = [
     name: 'reportscountwipe',
     description: 'Permanently wipe all saved report tickets (Admin only)',
     options: [{ name: 'confirm', description: 'Type CONFIRM to confirm wipe', type: 3, required: true }]
+  },
+
+  {
+    name: 'syncsheet',
+    description: 'Sync weekly reports and duty hours to the Google Sheet (Staff only)',
   },
 
   {
@@ -243,31 +253,31 @@ const SLASH_COMMANDS = [
     ],
   },
 
-  { name: 'ping',       description: 'Check bot latency' },
-  { name: 'userinfo',   description: 'Show info about a user',   options: [{ name: 'user', description: 'User to look up', type: 6, required: false }] },
-  { name: 'serverinfo', description: 'Show server stats and info' },
-  { name: 'roleinfo',   description: 'Show info about a role',   options: [{ name: 'role', description: 'Role to inspect', type: 8, required: true }] },
-  { name: 'avatar',     description: 'Show a user\'s full avatar', options: [{ name: 'user', description: 'User to show', type: 6, required: false }] },
-  { name: 'stats',      description: 'Show warn totals and who is on shift' },
+  { name: 'ping',        description: 'Check bot latency' },
+  { name: 'userinfo',    description: 'Show info about a user',   options: [{ name: 'user', description: 'User to look up', type: 6, required: false }] },
+  { name: 'serverinfo',  description: 'Show server stats and info' },
+  { name: 'roleinfo',    description: 'Show info about a role',   options: [{ name: 'role', description: 'Role to inspect', type: 8, required: true }] },
+  { name: 'avatar',      description: 'Show a user\'s full avatar', options: [{ name: 'user', description: 'User to show', type: 6, required: false }] },
+  { name: 'stats',       description: 'Show warn totals and who is on shift' },
   { name: 'membercount', description: 'Show the current member count' },
-  { name: 'botinfo',    description: 'Show bot version, uptime, and system info' },
+  { name: 'botinfo',     description: 'Show bot version, uptime, and system info' },
 
-  { name: 'say',      description: 'Make the bot say something in a channel', options: [{ name: 'message', description: 'What to say', type: 3, required: true }, { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
-  { name: 'embed',    description: 'Post a custom embed in this channel', options: [{ name: 'title', description: 'Embed title', type: 3, required: true }, { name: 'description', description: 'Embed body', type: 3, required: true }, { name: 'color', description: 'Hex color e.g. #ff0000', type: 3, required: false }] },
-  { name: 'announce', description: 'Send an announcement embed to a channel', options: [{ name: 'channel', description: 'Target channel', type: 7, required: true }, { name: 'message', description: 'Announcement text', type: 3, required: true }] },
-  { name: 'poll',     description: 'Post a yes/no or custom poll', options: [{ name: 'question', description: 'Poll question', type: 3, required: true }, { name: 'options', description: 'Comma-separated choices (leave blank for Yes/No)', type: 3, required: false }] },
-  { name: 'remind',   description: 'Set a reminder for yourself', options: [{ name: 'minutes', description: 'Minutes from now', type: 4, required: true, min_value: 1, max_value: 10080 }, { name: 'message', description: 'What to remind you about', type: 3, required: true }] },
-  { name: 'dm',       description: 'Send a DM to a user as the bot', options: [{ name: 'user', description: 'User to DM', type: 6, required: true }, { name: 'message', description: 'Message to send', type: 3, required: true }] },
-  { name: 'slowmode', description: 'Set slowmode on a channel', options: [{ name: 'seconds', description: 'Seconds (0 = off)', type: 4, required: true, min_value: 0, max_value: 21600 }, { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
+  { name: 'say',          description: 'Make the bot say something in a channel', options: [{ name: 'message', description: 'What to say', type: 3, required: true }, { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
+  { name: 'embed',        description: 'Post a custom embed in this channel', options: [{ name: 'title', description: 'Embed title', type: 3, required: true }, { name: 'description', description: 'Embed body', type: 3, required: true }, { name: 'color', description: 'Hex color e.g. #ff0000', type: 3, required: false }] },
+  { name: 'announce',     description: 'Send an announcement embed to a channel', options: [{ name: 'channel', description: 'Target channel', type: 7, required: true }, { name: 'message', description: 'Announcement text', type: 3, required: true }] },
+  { name: 'poll',         description: 'Post a yes/no or custom poll', options: [{ name: 'question', description: 'Poll question', type: 3, required: true }, { name: 'options', description: 'Comma-separated choices (leave blank for Yes/No)', type: 3, required: false }] },
+  { name: 'remind',       description: 'Set a reminder for yourself', options: [{ name: 'minutes', description: 'Minutes from now', type: 4, required: true, min_value: 1, max_value: 10080 }, { name: 'message', description: 'What to remind you about', type: 3, required: true }] },
+  { name: 'dm',           description: 'Send a DM to a user as the bot', options: [{ name: 'user', description: 'User to DM', type: 6, required: true }, { name: 'message', description: 'Message to send', type: 3, required: true }] },
+  { name: 'slowmode',     description: 'Set slowmode on a channel', options: [{ name: 'seconds', description: 'Seconds (0 = off)', type: 4, required: true, min_value: 0, max_value: 21600 }, { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
 
-  { name: 'addrole',      description: 'Add a role to a user',              options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'role', description: 'Role to add', type: 8, required: true }] },
-  { name: 'removerole',   description: 'Remove a role from a user',         options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'role', description: 'Role to remove', type: 8, required: true }] },
-  { name: 'nickname',     description: "Change a user's nickname",         options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'name', description: 'New nickname (omit to reset)', type: 3, required: false }] },
-  { name: 'lockdown',     description: 'Lock a channel (deny @everyone Send Messages)', options: [{ name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
-  { name: 'unlockdown',   description: 'Unlock a previously locked channel', options: [{ name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
+  { name: 'addrole',       description: 'Add a role to a user',               options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'role', description: 'Role to add', type: 8, required: true }] },
+  { name: 'removerole',    description: 'Remove a role from a user',          options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'role', description: 'Role to remove', type: 8, required: true }] },
+  { name: 'nickname',      description: "Change a user's nickname",          options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'name', description: 'New nickname (omit to reset)', type: 3, required: false }] },
+  { name: 'lockdown',      description: 'Lock a channel (deny @everyone Send Messages)', options: [{ name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
+  { name: 'unlockdown',    description: 'Unlock a previously locked channel', options: [{ name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
   { name: 'channelcreate', description: 'Create a new text or voice channel', options: [{ name: 'name', description: 'Channel name', type: 3, required: true }, { name: 'type', description: 'Channel type', type: 3, required: true, choices: [{ name: 'Text', value: 'text' }, { name: 'Voice', value: 'voice' }] }, { name: 'category', description: 'Parent category', type: 7, required: false }] },
-  { name: 'channeldelete', description: 'Delete a channel',                 options: [{ name: 'channel', description: 'Channel to delete', type: 7, required: true }] },
-  { name: 'massmove',     description: 'Move everyone from one voice channel to another', options: [{ name: 'from', description: 'Source voice channel', type: 7, required: true }, { name: 'to', description: 'Destination voice channel', type: 7, required: true }] },
+  { name: 'channeldelete', description: 'Delete a channel',                  options: [{ name: 'channel', description: 'Channel to delete', type: 7, required: true }] },
+  { name: 'massmove',      description: 'Move everyone from one voice channel to another', options: [{ name: 'from', description: 'Source voice channel', type: 7, required: true }, { name: 'to', description: 'Destination voice channel', type: 7, required: true }] },
 
   { name: 'safeplace', description: 'Start a private, supportive chat with SafePlace (sent to your DMs)' },
   { name: 'confess',   description: 'Submit an anonymous confession to the Freedom Wall (goes to staff review first)' },
@@ -396,6 +406,82 @@ async function getModLogs(userId) {
     .orderBy('createdAt', 'desc')
     .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// ── Google Sheets helper ────────────────────────────────────────
+
+async function getSheetsClient() {
+  const auth = new google.auth.JWT({
+    email: serviceAccount.client_email,
+    key: serviceAccount.private_key,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  });
+  return google.sheets({ version: 'v4', auth });
+}
+
+async function syncStatsToSheet(guildId) {
+  const sheets = await getSheetsClient();
+
+  // Read Column A (Staff ID) from Row 2 to Row 100
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!A2:A100`,
+  });
+
+  const rows = response.data.values || [];
+  if (!rows.length) return 0;
+
+  const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
+  const resetMs = lastWeeklyReset.toDate().getTime();
+
+  let updatedCount = 0;
+
+  for (let i = 0; i < rows.length; i++) {
+    const staffId = rows[i][0];
+    if (!staffId) continue;
+
+    const cleanStaffId = staffId.trim();
+
+    // 1. Get weekly reports count
+    const reportsSnap = await db.collection('report_tickets')
+      .where('guildId', '==', guildId)
+      .where('reporterId', '==', cleanStaffId)
+      .where('createdAt', '>=', lastWeeklyReset)
+      .get();
+    const reportCount = reportsSnap.size;
+
+    // 2. Get weekly completed shift hours
+    const shiftsSnap = await db.collection('shiftHistory')
+      .where('guildId', '==', guildId)
+      .where('userId', '==', cleanStaffId)
+      .get();
+
+    let totalShiftMs = 0;
+    shiftsSnap.forEach((doc) => {
+      const d = doc.data();
+      const endedMs = d.endedAt?.toDate?.().getTime();
+      if (endedMs && endedMs >= resetMs) {
+        totalShiftMs += d.durationMs || 0;
+      }
+    });
+
+    const dutyHoursDecimal = Number((totalShiftMs / (1000 * 60 * 60)).toFixed(2));
+    const rowIndex = i + 2; // +2 offset for 1-based indexing and row 1 header
+
+    // 3. Write into Column G (Reports) and Column H (Duty Hours)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!G${rowIndex}:H${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[reportCount, dutyHoursDecimal]],
+      },
+    });
+
+    updatedCount++;
+  }
+
+  return updatedCount;
 }
 
 // ── Shift / Wellness helpers ────────────────────────────────────
@@ -993,16 +1079,16 @@ async function callSafeplaceAPI(history) {
 const SAFEPLACE_MOODS = [
   { id: 'sad',          label: '😔 Sad',          text: "I've been feeling really sad lately and I don't fully understand why." },
   { id: 'anxious',      label: '😰 Anxious',      text: "I've been feeling anxious and I can't seem to shake it." },
-  { id: 'frustrated',  label: '😤 Frustrated', text: "I'm feeling really frustrated right now." },
-  { id: 'overwhelmed', label: '🤯 Overwhelmed', text: "I feel completely overwhelmed and don't know where to start." },
-  { id: 'lonely',      label: '🥺 Lonely',      text: "I've been feeling really lonely even when I'm around people." },
-  { id: 'unsure',      label: '💭 Not sure',    text: "I'm not sure what I'm feeling — something just feels off." },
+  { id: 'frustrated',   label: '😤 Frustrated', text: "I'm feeling really frustrated right now." },
+  { id: 'overwhelmed',  label: '🤯 Overwhelmed', text: "I feel completely overwhelmed and don't know where to start." },
+  { id: 'lonely',       label: '🥺 Lonely',      text: "I've been feeling really lonely even when I'm around people." },
+  { id: 'unsure',       label: '💭 Not sure',    text: "I'm not sure what I'm feeling — something just feels off." },
 ];
 
 const SAFEPLACE_QUICK_REPLIES = [
-  { id: 'more',    label: 'I want to say more…' },
-  { id: 'name',    label: "Help me name what I'm feeling" },
-  { id: 'why',     label: 'Why do you think I feel this way?' },
+  { id: 'more',     label: 'I want to say more…' },
+  { id: 'name',     label: "Help me name what I'm feeling" },
+  { id: 'why',      label: 'Why do you think I feel this way?' },
   { id: 'help_now', label: 'What can I do right now?' },
 ];
 
@@ -1337,10 +1423,9 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.editReply('Sent — check your DMs 💬');
   }
 
- if (cmd === 'reportscount') {
-    // Default to the person running the command if no user is passed
+  if (cmd === 'reportscount') {
     const target = interaction.options.getUser('user') || interaction.user;
-    await interaction.deferReply(); // Removed ephemeral so the result is posted publicly
+    await interaction.deferReply();
 
     // 6 = Saturday at 00:00 UTC
     const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
@@ -1404,6 +1489,30 @@ client.on('interactionCreate', async (interaction) => {
     return sendModLog(interaction.guild, embed, interaction.channelId);
   }
 
+  if (cmd === 'syncsheet') {
+    if (!requireStaff(interaction)) {
+      return interaction.reply({ content: 'Staff only.', ephemeral: true });
+    }
+
+    await interaction.deferReply();
+
+    try {
+      const count = await syncStatsToSheet(interaction.guild.id);
+
+      const embed = new EmbedBuilder()
+        .setColor(COLORS.success)
+        .setTitle('Google Sheet Synced')
+        .setDescription(`Successfully updated **${count}** staff member rows with this week's reports and duty hours.`)
+        .setFooter({ text: BRAND_FOOTER })
+        .setTimestamp();
+
+      return interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('Error syncing Google Sheet:', err);
+      return interaction.editReply(`Failed to sync sheet: \`${err.message}\``);
+    }
+  }
+
   if (cmd === 'confess') {
     if (!FREEDOM_WALL_CHANNEL_ID || !FREEDOM_WALL_REVIEW_CHANNEL_ID) {
       return interaction.reply({ content: 'Freedom Wall is not configured yet — ask an admin to set it up.', ephemeral: true });
@@ -1428,14 +1537,14 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle(`${client.user.username} — Bot Info`)
       .setThumbnail(client.user.displayAvatarURL())
       .addFields(
-        { name: 'Uptime',        value: `${h}h ${m}m ${s}s`,                         inline: true },
-        { name: 'API Latency',  value: `${Math.round(client.ws.ping)}ms`,             inline: true },
-        { name: 'Memory',       value: `${Math.round(mem.heapUsed / 1024 / 1024)}MB`, inline: true },
-        { name: 'Servers',      value: `${client.guilds.cache.size}`,                 inline: true },
+        { name: 'Uptime',        value: `${h}h ${m}m ${s}s`,                                         inline: true },
+        { name: 'API Latency',  value: `${Math.round(client.ws.ping)}ms`,                             inline: true },
+        { name: 'Memory',       value: `${Math.round(mem.heapUsed / 1024 / 1024)}MB`,                 inline: true },
+        { name: 'Servers',      value: `${client.guilds.cache.size}`,                                 inline: true },
         { name: 'Members',      value: `${client.guilds.cache.reduce((a, g) => a + g.memberCount, 0)}`, inline: true },
-        { name: 'Commands',     value: `${SLASH_COMMANDS.length}`,                   inline: true },
-        { name: 'Node.js',      value: process.version,                              inline: true },
-        { name: 'discord.js',   value: 'v14',                                         inline: true },
+        { name: 'Commands',     value: `${SLASH_COMMANDS.length}`,                                   inline: true },
+        { name: 'Node.js',      value: process.version,                                               inline: true },
+        { name: 'discord.js',   value: 'v14',                                                         inline: true },
       )
       .setFooter({ text: BRAND_FOOTER })
       .setTimestamp();
@@ -1451,12 +1560,12 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle(target.username)
       .setThumbnail(target.displayAvatarURL({ size: 256 }))
       .addFields(
-        { name: 'Tag',              value: target.tag,                                                  inline: true },
-        { name: 'ID',               value: target.id,                                                   inline: true },
-        { name: 'Bot',              value: target.bot ? 'Yes' : 'No',                                   inline: true },
-        { name: 'Account Created',  value: `<t:${Math.floor(target.createdTimestamp / 1000)}:R>`,                    inline: true },
+        { name: 'Tag',              value: target.tag,                                                                 inline: true },
+        { name: 'ID',               value: target.id,                                                                  inline: true },
+        { name: 'Bot',              value: target.bot ? 'Yes' : 'No',                                                  inline: true },
+        { name: 'Account Created',  value: `<t:${Math.floor(target.createdTimestamp / 1000)}:R>`,                     inline: true },
         { name: 'Joined Server',    value: member ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'N/A',   inline: true },
-        { name: 'Warnings',         value: `${warns.length}`,                                           inline: true },
+        { name: 'Warnings',         value: `${warns.length}`,                                                          inline: true },
         { name: 'Roles',            value: member ? (member.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None') : 'N/A' },
       )
       .setFooter({ text: BRAND_FOOTER })
@@ -1473,7 +1582,7 @@ client.on('interactionCreate', async (interaction) => {
       .addFields(
         { name: 'Owner',        value: `<@${g.ownerId}>`,                                  inline: true },
         { name: 'ID',           value: g.id,                                               inline: true },
-        { name: 'Created',      value: `<t:${Math.floor(g.createdTimestamp / 1000)}:R>`,                  inline: true },
+        { name: 'Created',      value: `<t:${Math.floor(g.createdTimestamp / 1000)}:R>`,   inline: true },
         { name: 'Members',      value: `${g.memberCount}`,                                 inline: true },
         { name: 'Channels',     value: `${g.channels.cache.size}`,                         inline: true },
         { name: 'Roles',        value: `${g.roles.cache.size}`,                            inline: true },
@@ -1491,13 +1600,13 @@ client.on('interactionCreate', async (interaction) => {
     const embed = new EmbedBuilder().setColor(role.color || COLORS.primary)
       .setTitle(role.name)
       .addFields(
-        { name: 'ID',              value: role.id,                               inline: true },
-        { name: 'Color',           value: role.hexColor,                        inline: true },
-        { name: 'Position',        value: `${role.position}`,                   inline: true },
-        { name: 'Members',         value: `${role.members.size}`,               inline: true },
-        { name: 'Mentionable',     value: role.mentionable ? 'Yes' : 'No',        inline: true },
-        { name: 'Hoisted',         value: role.hoist ? 'Yes' : 'No',           inline: true },
-        { name: 'Created',         value: `<t:${Math.floor(role.createdTimestamp / 1000)}:R>`, inline: true },
+        { name: 'ID',               value: role.id,                               inline: true },
+        { name: 'Color',            value: role.hexColor,                         inline: true },
+        { name: 'Position',         value: `${role.position}`,                    inline: true },
+        { name: 'Members',          value: `${role.members.size}`,                inline: true },
+        { name: 'Mentionable',      value: role.mentionable ? 'Yes' : 'No',        inline: true },
+        { name: 'Hoisted',          value: role.hoist ? 'Yes' : 'No',             inline: true },
+        { name: 'Created',          value: `<t:${Math.floor(role.createdTimestamp / 1000)}:R>`, inline: true },
         { name: 'Key Permissions', value: perms },
       )
       .setFooter({ text: BRAND_FOOTER })
@@ -1552,11 +1661,11 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle('Warning Issued')
       .setThumbnail(target.displayAvatarURL())
       .addFields(
-        { name: 'User',        value: `<@${target.id}> (${target.tag})`, inline: true },
-        { name: 'Issued By',  value: `<@${interaction.user.id}>`,       inline: true },
+        { name: 'User',         value: `<@${target.id}> (${target.tag})`, inline: true },
+        { name: 'Issued By',   value: `<@${interaction.user.id}>`,       inline: true },
         { name: 'Active Warns', value: `${activeWarns.length} (${allWarns.length} all-time)`, inline: true },
-        { name: 'Reason',     value: reason },
-        { name: 'Warning ID', value: `\`${warnId}\`` },
+        { name: 'Reason',      value: reason },
+        { name: 'Warning ID',  value: `\`${warnId}\`` },
       )
       .setFooter({ text: BRAND_FOOTER })
       .setTimestamp();
@@ -1680,10 +1789,10 @@ client.on('interactionCreate', async (interaction) => {
       const embed = new EmbedBuilder().setColor(COLORS.danger)
         .setTitle('Member Banned')
         .addFields(
-          { name: 'User',           value: `${target.tag} (${target.id})`, inline: true },
-          { name: 'By',             value: interaction.user.tag,           inline: true },
-          { name: 'Messages Deleted', value: `${days} day(s)`,              inline: true },
-          { name: 'Reason',         value: reason },
+          { name: 'User',             value: `${target.tag} (${target.id})`, inline: true },
+          { name: 'By',               value: interaction.user.tag,            inline: true },
+          { name: 'Messages Deleted', value: `${days} day(s)`,               inline: true },
+          { name: 'Reason',           value: reason },
         )
         .setFooter({ text: BRAND_FOOTER })
         .setTimestamp();
@@ -1736,7 +1845,7 @@ client.on('interactionCreate', async (interaction) => {
       const embed = new EmbedBuilder().setColor(COLORS.warning)
         .setTitle('Member Timed Out')
         .addFields(
-          { name: 'User',     value: `${target.tag}`,     inline: true },
+          { name: 'User',     value: `${target.tag}`,      inline: true },
           { name: 'Duration', value: `${minutes} min(s)`, inline: true },
           { name: 'By',       value: interaction.user.tag, inline: true },
           { name: 'Reason',   value: reason },
@@ -1921,7 +2030,7 @@ client.on('interactionCreate', async (interaction) => {
           .addFields(
             { name: 'Completed Shifts Removed', value: `${historyDeleted}`, inline: true },
             { name: 'Live Shifts Removed',      value: `${liveDeleted}`,    inline: true },
-            { name: 'Performed By',             value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Performed By',              value: `<@${interaction.user.id}>`, inline: true },
           )
           .setFooter({ text: BRAND_FOOTER })
           .setTimestamp();
