@@ -450,7 +450,7 @@ async function syncStatsToSheet(guildId) {
       .get();
     const reportCount = reportsSnap.size;
 
-    // 2. Get weekly completed shift hours
+    // 2. Get completed shift hours (matches all-time in DB until wiped)
     const shiftsSnap = await db.collection('shiftHistory')
       .where('guildId', '==', guildId)
       .where('userId', '==', cleanStaffId)
@@ -459,10 +459,7 @@ async function syncStatsToSheet(guildId) {
     let totalShiftMs = 0;
     shiftsSnap.forEach((doc) => {
       const d = doc.data();
-      const endedMs = d.endedAt?.toDate?.().getTime();
-      if (endedMs && endedMs >= resetMs) {
-        totalShiftMs += d.durationMs || 0;
-      }
+      totalShiftMs += d.durationMs || 0;
     });
 
     const dutyHoursDecimal = Number((totalShiftMs / (1000 * 60 * 60)).toFixed(2));
