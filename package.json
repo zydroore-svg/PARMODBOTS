@@ -10,10 +10,6 @@
     "node": ">=18"
   },
   "dependencies": {
-  "name": "par-discord-bot",
-  "version": "1.0.0",
-  "type": "module",
-  "dependencies": {
     "bad-words": "^3.0.4",
     "discord.js": "^14.14.1",
     "dotenv": "^16.4.5",
