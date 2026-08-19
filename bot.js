@@ -50,7 +50,11 @@ const REPORT_CHANNEL_IDS = (process.env.LOG_CHANNEL_IDS || LOG_CHANNEL_ID || '')
 
 // ── Google Sheets config ─────────────────────────────────────
 const SPREADSHEET_ID = '1EaadsUOc1RmdwG-8JDDP-uW8JWRs69no9KmnkLvrVSo';
-const SHEET_NAME = 'Staff Database';
+const SHEET_NAME = 'PARMOD Staff';
+
+// ── Automated Attendance Config ──────────────────────────────
+const ATTENDANCE_THRESHOLD_HOURS = 3;
+const ATTENDANCE_THRESHOLD_MS = ATTENDANCE_THRESHOLD_HOURS * 60 * 60 * 1000;
 
 // ── SafePlace config ─────────────────────────────────────────
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
@@ -177,7 +181,7 @@ const SLASH_COMMANDS = [
 
   {
     name: 'syncsheet',
-    description: 'Sync weekly reports and duty hours to the Google Sheet (Staff only)',
+    description: 'Sync weekly reports, duty hours, and attendance to the Google Sheet (Staff only)',
   },
 
   {
@@ -262,21 +266,48 @@ const SLASH_COMMANDS = [
   { name: 'membercount', description: 'Show the current member count' },
   { name: 'botinfo',     description: 'Show bot version, uptime, and system info' },
 
-  { name: 'say',          description: 'Make the bot say something in a channel', options: [{ name: 'message', description: 'What to say', type: 3, required: true }, { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
+  {
+    name: 'say',
+    description: 'Make the bot say something in a channel',
+    options: [
+      { name: 'message', description: 'What to say (use \\n or Shift+Enter for new lines)', type: 3, required: true },
+      { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false },
+    ],
+  },
+  {
+    name: 'announce',
+    description: 'Send a formal announcement embed (no ping by default)',
+    options: [
+      { name: 'message', description: 'Announcement body (supports \\n or Shift+Enter for paragraphs)', type: 3, required: true },
+      { name: 'title', description: 'Embed header/title (default: Announcement)', type: 3, required: false },
+      { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false },
+      {
+        name: 'ping',
+        description: 'Mention role/everyone (default: None)',
+        type: 3,
+        required: false,
+        choices: [
+          { name: 'None (No Ping)', value: 'none' },
+          { name: '@everyone', value: 'everyone' },
+          { name: '@here', value: 'here' },
+        ],
+      },
+      { name: 'color', description: 'Hex color (e.g. #2B2D42 or #2E7D32)', type: 3, required: false },
+    ],
+  },
   { name: 'embed',        description: 'Post a custom embed in this channel', options: [{ name: 'title', description: 'Embed title', type: 3, required: true }, { name: 'description', description: 'Embed body', type: 3, required: true }, { name: 'color', description: 'Hex color e.g. #ff0000', type: 3, required: false }] },
-  { name: 'announce',     description: 'Send an announcement embed to a channel', options: [{ name: 'channel', description: 'Target channel', type: 7, required: true }, { name: 'message', description: 'Announcement text', type: 3, required: true }] },
   { name: 'poll',         description: 'Post a yes/no or custom poll', options: [{ name: 'question', description: 'Poll question', type: 3, required: true }, { name: 'options', description: 'Comma-separated choices (leave blank for Yes/No)', type: 3, required: false }] },
   { name: 'remind',       description: 'Set a reminder for yourself', options: [{ name: 'minutes', description: 'Minutes from now', type: 4, required: true, min_value: 1, max_value: 10080 }, { name: 'message', description: 'What to remind you about', type: 3, required: true }] },
   { name: 'dm',           description: 'Send a DM to a user as the bot', options: [{ name: 'user', description: 'User to DM', type: 6, required: true }, { name: 'message', description: 'Message to send', type: 3, required: true }] },
   { name: 'slowmode',     description: 'Set slowmode on a channel', options: [{ name: 'seconds', description: 'Seconds (0 = off)', type: 4, required: true, min_value: 0, max_value: 21600 }, { name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
 
-  { name: 'addrole',       description: 'Add a role to a user',               options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'role', description: 'Role to add', type: 8, required: true }] },
+  { name: 'addrole',       description: 'Add a role to a user',                options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'role', description: 'Role to add', type: 8, required: true }] },
   { name: 'removerole',    description: 'Remove a role from a user',          options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'role', description: 'Role to remove', type: 8, required: true }] },
   { name: 'nickname',      description: "Change a user's nickname",          options: [{ name: 'user', description: 'User', type: 6, required: true }, { name: 'name', description: 'New nickname (omit to reset)', type: 3, required: false }] },
   { name: 'lockdown',      description: 'Lock a channel (deny @everyone Send Messages)', options: [{ name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
   { name: 'unlockdown',    description: 'Unlock a previously locked channel', options: [{ name: 'channel', description: 'Target channel (default: here)', type: 7, required: false }] },
   { name: 'channelcreate', description: 'Create a new text or voice channel', options: [{ name: 'name', description: 'Channel name', type: 3, required: true }, { name: 'type', description: 'Channel type', type: 3, required: true, choices: [{ name: 'Text', value: 'text' }, { name: 'Voice', value: 'voice' }] }, { name: 'category', description: 'Parent category', type: 7, required: false }] },
-  { name: 'channeldelete', description: 'Delete a channel',                  options: [{ name: 'channel', description: 'Channel to delete', type: 7, required: true }] },
+  { name: 'channeldelete', description: 'Delete a channel',                   options: [{ name: 'channel', description: 'Channel to delete', type: 7, required: true }] },
   { name: 'massmove',      description: 'Move everyone from one voice channel to another', options: [{ name: 'from', description: 'Source voice channel', type: 7, required: true }, { name: 'to', description: 'Destination voice channel', type: 7, required: true }] },
 
   { name: 'safeplace', description: 'Start a private, supportive chat with SafePlace (sent to your DMs)' },
@@ -307,8 +338,13 @@ client.login(DISCORD_BOT_TOKEN).catch((err) => {
 
 // ── 4. Helpers ────────────────────────────────────────────────
 
-// Gets the timestamp for the most recent fixed weekly reset (0 = Sunday, 1 = Monday, etc.)
-function getFixedWeeklyResetTimestamp(resetDayOfWeek = 1) {
+function getTodayDateKey() {
+  const now = new Date();
+  return now.toISOString().split('T')[0];
+}
+
+// Gets the timestamp for the most recent fixed weekly reset (0 = Sunday, 1 = Monday, 6 = Saturday, etc.)
+function getFixedWeeklyResetTimestamp(resetDayOfWeek = 6) {
   const now = new Date();
   const resetDate = new Date(now);
 
@@ -432,7 +468,6 @@ async function syncStatsToSheet(guildId) {
   if (!rows.length) return 0;
 
   const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
-  const resetMs = lastWeeklyReset.toDate().getTime();
 
   let updatedCount = 0;
 
@@ -450,7 +485,7 @@ async function syncStatsToSheet(guildId) {
       .get();
     const reportCount = reportsSnap.size;
 
-    // 2. Get completed shift hours (matches all-time in DB until wiped)
+    // 2. Get completed shift hours
     const shiftsSnap = await db.collection('shiftHistory')
       .where('guildId', '==', guildId)
       .where('userId', '==', cleanStaffId)
@@ -463,9 +498,18 @@ async function syncStatsToSheet(guildId) {
     });
 
     const dutyHoursDecimal = Number((totalShiftMs / (1000 * 60 * 60)).toFixed(2));
+
+    // 3. Get weekly attendance count
+    const attendanceSnap = await db.collection('attendance')
+      .where('guildId', '==', guildId)
+      .where('userId', '==', cleanStaffId)
+      .where('createdAt', '>=', lastWeeklyReset)
+      .get();
+    const attendanceCount = attendanceSnap.size;
+
     const rowIndex = i + 2; // +2 offset for 1-based indexing and row 1 header
 
-    // 3. Write into Column G (Reports) and Column H (Duty Hours)
+    // 4. Write into Column G (Reports) and Column H (Duty Hours)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!G${rowIndex}:H${rowIndex}`,
@@ -475,10 +519,114 @@ async function syncStatsToSheet(guildId) {
       },
     });
 
+    // 5. Write into Column J (Attendance)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!J${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[attendanceCount]],
+      },
+    });
+
     updatedCount++;
   }
 
   return updatedCount;
+}
+
+// ── Automated Attendance Tracker ─────────────────────────────────
+async function checkAndRecordAttendance(guild, shift, now = Date.now()) {
+  if (shift.status !== 'active') return;
+
+  const startedMs = shift.startedAt?.toDate?.().getTime() ?? now;
+  const elapsedMs = now - startedMs;
+
+  // Check if they have been active on duty for 3 hours or more
+  if (elapsedMs < ATTENDANCE_THRESHOLD_MS) return;
+
+  const dateKey = getTodayDateKey();
+  const attendanceDocId = `${shift.guildId}_${shift.userId}_${dateKey}`;
+  const attendanceRef = db.collection('attendance').doc(attendanceDocId);
+
+  // If already recorded today, skip
+  const existingDoc = await attendanceRef.get();
+  if (existingDoc.exists) return;
+
+  // 1. Record in Firestore
+  await attendanceRef.set({
+    guildId: shift.guildId,
+    userId: shift.userId,
+    username: shift.username,
+    dateKey: dateKey,
+    dutyDurationMs: elapsedMs,
+    status: 'Present',
+    createdAt: FieldValue.serverTimestamp(),
+  });
+
+  // 2. Count weekly attendance days for this user
+  const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
+  const weeklyAttendanceSnap = await db.collection('attendance')
+    .where('guildId', '==', shift.guildId)
+    .where('userId', '==', shift.userId)
+    .where('createdAt', '>=', lastWeeklyReset)
+    .get();
+
+  const totalWeeklyAttendanceDays = weeklyAttendanceSnap.size;
+
+  // 3. Update Column J in the Sheet for this staff member
+  try {
+    const sheets = await getSheetsClient();
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A2:A100`,
+    });
+
+    const rows = response.data.values || [];
+    const rowIndex = rows.findIndex((row) => row[0]?.trim() === shift.userId.trim());
+
+    if (rowIndex !== -1) {
+      const sheetRowNumber = rowIndex + 2;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!J${sheetRowNumber}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: [[totalWeeklyAttendanceDays]],
+        },
+      });
+      console.log(`Updated Column J for ${shift.username} to ${totalWeeklyAttendanceDays} attendance day(s).`);
+    }
+  } catch (sheetErr) {
+    console.error('Failed to update attendance on Google Sheet:', sheetErr.message);
+  }
+
+  // 4. Send Confirmation Mod Log
+  const attendanceEmbed = new EmbedBuilder()
+    .setColor(COLORS.success)
+    .setTitle('Automated Attendance Recorded')
+    .setDescription(
+      `🎉 <@${shift.userId}> has completed **${ATTENDANCE_THRESHOLD_HOURS} hours** of active duty today and has been marked **Present**!`
+    )
+    .addFields(
+      { name: 'Staff Member', value: `${shift.username} (\`${shift.userId}\`)`, inline: true },
+      { name: 'Weekly Attendance Days', value: `**${totalWeeklyAttendanceDays}** day(s)`, inline: true },
+      { name: 'Time on Duty', value: formatDuration(elapsedMs), inline: true }
+    )
+    .setFooter({ text: BRAND_FOOTER })
+    .setTimestamp();
+
+  await sendModLog(guild, attendanceEmbed);
+
+  // 5. Notify Staff via DM
+  try {
+    const member = await guild.members.fetch(shift.userId).catch(() => null);
+    await member?.user.send(
+      `✅ You've completed **3 hours on duty** in **${guild.name}** today! Your daily attendance has been recorded to the database and staff sheet.`
+    );
+  } catch {
+    /* DMs closed */
+  }
 }
 
 // ── Shift / Wellness helpers ────────────────────────────────────
@@ -844,7 +992,7 @@ async function handleFailedWellnessCheck(guild, fallbackChannel, shift) {
         `You missed a wellness check in **${guild.name}**. Your current active shift duty has been ended and discarded. ` +
         `Run \`/shift manage\` if you'd like to clock back in.`
       );
-    } catch { /* DMs may be closed — non-fatal */ }
+    } catch { /* DMs may be closed */ }
   }
 }
 
@@ -880,7 +1028,7 @@ async function handleExpiredPause(guild, fallbackChannel, shift) {
     await member?.user.send(
       `Your shift in **${guild.name}** was paused for over ${WELLNESS_MAX_PAUSE_MINUTES} minutes and has been automatically ended. Run \`/shift manage\` to clock back in.`
     );
-  } catch { /* DMs may be closed — non-fatal */ }
+  } catch { /* DMs may be closed */ }
 }
 
 async function runWellnessCheck() {
@@ -900,6 +1048,9 @@ async function runWellnessCheck() {
 
     for (const docSnap of snap.docs) {
       const shift = { guildId: GUILD_ID, ...docSnap.data() };
+
+      // ── 3-HOUR AUTOMATED ATTENDANCE CHECK ──
+      await checkAndRecordAttendance(guild, shift, now);
 
       if (shift.status === 'paused') {
         const pausedMs = shift.pausedAt?.toDate?.().getTime();
@@ -1499,7 +1650,7 @@ client.on('interactionCreate', async (interaction) => {
       const embed = new EmbedBuilder()
         .setColor(COLORS.success)
         .setTitle('Google Sheet Synced')
-        .setDescription(`Successfully updated **${count}** staff member rows with this week's reports and duty hours.`)
+        .setDescription(`Successfully updated **${count}** staff member rows with this week's reports, duty hours, and attendance.`)
         .setFooter({ text: BRAND_FOOTER })
         .setTimestamp();
 
@@ -1659,7 +1810,7 @@ client.on('interactionCreate', async (interaction) => {
       .setThumbnail(target.displayAvatarURL())
       .addFields(
         { name: 'User',         value: `<@${target.id}> (${target.tag})`, inline: true },
-        { name: 'Issued By',   value: `<@${interaction.user.id}>`,       inline: true },
+        { name: 'Issued By',   value: `<@${interaction.user.id}>`,        inline: true },
         { name: 'Active Warns', value: `${activeWarns.length} (${allWarns.length} all-time)`, inline: true },
         { name: 'Reason',      value: reason },
         { name: 'Warning ID',  value: `\`${warnId}\`` },
@@ -2046,13 +2197,54 @@ client.on('interactionCreate', async (interaction) => {
 
   if (cmd === 'say') {
     if (!requireStaff(interaction)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
-    const message = interaction.options.getString('message');
+    
+    // Parse literal \n into real line breaks to preserve spacing
+    const rawMessage = interaction.options.getString('message');
+    const message = rawMessage.replace(/\\n/g, '\n');
     const channel = interaction.options.getChannel('channel') || interaction.channel;
+
     try {
       await channel.send(message);
       return interaction.reply({ content: `Message sent to ${channel}.`, ephemeral: true });
     } catch (err) {
       return interaction.reply({ content: 'Could not send message to that channel.', ephemeral: true });
+    }
+  }
+
+  if (cmd === 'announce') {
+    if (!requireStaff(interaction, PermissionFlagsBits.Administrator)) {
+      return interaction.reply({ content: 'Administrators only.', ephemeral: true });
+    }
+
+    const rawMessage = interaction.options.getString('message');
+    const formattedMessage = rawMessage.replace(/\\n/g, '\n');
+    const title = interaction.options.getString('title') || 'Announcement';
+    const targetChannel = interaction.options.getChannel('channel') || interaction.channel;
+    const pingType = interaction.options.getString('ping') || 'none';
+    const colorInput = interaction.options.getString('color') || '#2B2D42';
+    const validColor = /^#[0-9A-Fa-f]{6}$/.test(colorInput) ? colorInput : COLORS.primary;
+
+    const embed = new EmbedBuilder()
+      .setColor(validColor)
+      .setTitle(`📢  ${title}`)
+      .setDescription(formattedMessage)
+      .setFooter({ text: `Published by ${interaction.user.tag} · ${BRAND_FOOTER}` })
+      .setTimestamp();
+
+    // Determine mention content
+    let content = null;
+    if (pingType === 'everyone') content = '@everyone';
+    if (pingType === 'here') content = '@here';
+
+    try {
+      const payload = { embeds: [embed] };
+      if (content) payload.content = content;
+
+      await targetChannel.send(payload);
+      return interaction.reply({ content: `Announcement posted to ${targetChannel}.`, ephemeral: true });
+    } catch (err) {
+      console.error('/announce error:', err);
+      return interaction.reply({ content: 'Could not post to that channel. Check my permissions.', ephemeral: true });
     }
   }
 
@@ -2065,24 +2257,6 @@ client.on('interactionCreate', async (interaction) => {
     const embed = new EmbedBuilder().setColor(validColor).setTitle(title).setDescription(description).setTimestamp();
     await interaction.channel.send({ embeds: [embed] });
     return interaction.reply({ content: 'Embed posted.', ephemeral: true });
-  }
-
-  if (cmd === 'announce') {
-    if (!requireStaff(interaction, PermissionFlagsBits.Administrator))
-      return interaction.reply({ content: 'Administrators only.', ephemeral: true });
-    const targetChannel = interaction.options.getChannel('channel');
-    const message = interaction.options.getString('message');
-    const embed = new EmbedBuilder().setColor(COLORS.primary)
-      .setTitle('Announcement')
-      .setDescription(message)
-      .setFooter({ text: `Posted by ${interaction.user.tag}` })
-      .setTimestamp();
-    try {
-      await targetChannel.send({ content: '@everyone', embeds: [embed] });
-      return interaction.reply({ content: `Announcement sent to ${targetChannel}.`, ephemeral: true });
-    } catch {
-      return interaction.reply({ content: 'Could not post to that channel.', ephemeral: true });
-    }
   }
 
   if (cmd === 'poll') {
@@ -2275,17 +2449,14 @@ client.on('interactionCreate', async (interaction) => {
 
 // ── 8. External Bot Report Ticket Listeners ─────────────────────
 
-// Helper: Check if embed indicates report ticket is denied/closed
 function isReportDeniedOrClosed(embed) {
   if (!embed) return false;
 
-  // Check Status field
   const statusField = embed.fields?.find(f => f.name === 'Status');
   if (statusField && /denied|rejected|closed/i.test(statusField.value)) {
     return true;
   }
 
-  // Check Embed Title
   if (embed.title && /denied|rejected|closed/i.test(embed.title)) {
     return true;
   }
@@ -2308,13 +2479,11 @@ client.on('messageCreate', async (message) => {
   if (embed.title && embed.title.includes('Discord Report Ticket')) {
     let reporterId = null;
 
-    // Method 1: Check message content (e.g. "New report submitted by <@649164303915548672>")
     if (message.content) {
       const match = message.content.match(/<@!?(\d{17,19})>/);
       if (match) reporterId = match[1];
     }
 
-    // Method 2: Extract from the "Reporter" embed field: "@User ( 649164303915548672 )"
     if (!reporterId) {
       const reporterField = embed.fields?.find(f => f.name === 'Reporter');
       if (reporterField) {
@@ -2328,7 +2497,6 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // Skip saving if ticket is already denied on arrival
     if (isReportDeniedOrClosed(embed)) {
       console.log(`Skipping ticket #${message.id} — marked as Denied/Rejected`);
       return;
@@ -2352,7 +2520,6 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// Listener: Auto-delete ticket from Firestore if CST updates embed status to Denied/Rejected
 client.on('messageUpdate', async (oldMessage, newMessage) => {
   if (!REPORT_CHANNEL_IDS.includes(newMessage.channel.id)) return;
   if (!newMessage.author?.bot || newMessage.author.id === client.user.id) return;
@@ -2369,7 +2536,6 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
   }
 });
 
-// Listener: Auto-delete ticket from Firestore if ticket message gets deleted in Discord
 client.on('messageDelete', async (message) => {
   if (!REPORT_CHANNEL_IDS.includes(message.channel.id)) return;
 
