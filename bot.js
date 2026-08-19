@@ -180,6 +180,12 @@ const SLASH_COMMANDS = [
   },
 
   {
+    name: 'attendancewipe',
+    description: 'Permanently wipe all attendance records and reset Sheet Column J to 0 (Admin only)',
+    options: [{ name: 'confirm', description: 'Type CONFIRM to proceed', type: 3, required: true }]
+  },
+
+  {
     name: 'syncsheet',
     description: 'Sync weekly reports, duty hours, and attendance to the Google Sheet (Staff only)',
   },
@@ -458,10 +464,10 @@ async function getSheetsClient() {
 async function syncStatsToSheet(guildId) {
   const sheets = await getSheetsClient();
 
-  // Read Column A (Staff ID) from Row 2 to Row 100
+  // Read Column A (Staff ID) from Row 2 to Row 100 using single quotes for sheet names with spaces
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A2:A100`,
+    range: `'${SHEET_NAME}'!A2:A100`,
   });
 
   const rows = response.data.values || [];
@@ -485,7 +491,7 @@ async function syncStatsToSheet(guildId) {
       .get();
     const reportCount = reportsSnap.size;
 
-    // 2. Get completed shift hours
+    // 2. Get completed shift hours (matches all-time in DB until wiped)
     const shiftsSnap = await db.collection('shiftHistory')
       .where('guildId', '==', guildId)
       .where('userId', '==', cleanStaffId)
@@ -512,7 +518,7 @@ async function syncStatsToSheet(guildId) {
     // 4. Write into Column G (Reports) and Column H (Duty Hours)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!G${rowIndex}:H${rowIndex}`,
+      range: `'${SHEET_NAME}'!G${rowIndex}:H${rowIndex}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[reportCount, dutyHoursDecimal]],
@@ -522,7 +528,7 @@ async function syncStatsToSheet(guildId) {
     // 5. Write into Column J (Attendance)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!J${rowIndex}`,
+      range: `'${SHEET_NAME}'!J${rowIndex}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[attendanceCount]],
@@ -579,7 +585,7 @@ async function checkAndRecordAttendance(guild, shift, now = Date.now()) {
     const sheets = await getSheetsClient();
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A2:A100`,
+      range: `'${SHEET_NAME}'!A2:A100`,
     });
 
     const rows = response.data.values || [];
@@ -589,7 +595,7 @@ async function checkAndRecordAttendance(guild, shift, now = Date.now()) {
       const sheetRowNumber = rowIndex + 2;
       await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!J${sheetRowNumber}`,
+        range: `'${SHEET_NAME}'!J${sheetRowNumber}`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
           values: [[totalWeeklyAttendanceDays]],
@@ -1628,6 +1634,61 @@ client.on('interactionCreate', async (interaction) => {
       .setDescription(`All stored report ticket logs for this server have been permanently cleared.`)
       .addFields(
         { name: 'Tickets Deleted', value: `${deletedCount}`, inline: true },
+        { name: 'Performed By',     value: `<@${interaction.user.id}>`, inline: true }
+      )
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
+    return sendModLog(interaction.guild, embed, interaction.channelId);
+  }
+
+  if (cmd === 'attendancewipe') {
+    if (!requireStaff(interaction, PermissionFlagsBits.Administrator)) {
+      return interaction.reply({ content: 'Administrators only — this permanently wipes attendance data.', ephemeral: true });
+    }
+
+    const confirm = interaction.options.getString('confirm');
+    if (confirm !== 'CONFIRM') {
+      return interaction.reply({ content: 'Not confirmed. Re-run command with `confirm` set to `CONFIRM` to proceed.', ephemeral: true });
+    }
+
+    await interaction.deferReply();
+
+    // 1. Delete all Firestore attendance records for this guild
+    const deletedCount = await wipeCollectionForGuild('attendance', interaction.guild.id);
+
+    // 2. Reset Column J (Attendance) to 0 for all staff rows in Google Sheets
+    try {
+      const sheets = await getSheetsClient();
+      const response = await sheets.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `'${SHEET_NAME}'!A2:A100`,
+      });
+
+      const rows = response.data.values || [];
+      const resetValues = rows.map(() => [0]);
+
+      if (resetValues.length > 0) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `'${SHEET_NAME}'!J2:J${rows.length + 1}`,
+          valueInputOption: 'USER_ENTERED',
+          requestBody: {
+            values: resetValues,
+          },
+        });
+      }
+    } catch (sheetErr) {
+      console.error('Failed to reset sheet attendance:', sheetErr.message);
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(COLORS.danger)
+      .setTitle('Attendance Records Wiped')
+      .setDescription('All recorded attendance history has been wiped from the database and the Google Sheet has been reset to 0.')
+      .addFields(
+        { name: 'Records Deleted', value: `${deletedCount}`, inline: true },
         { name: 'Performed By',     value: `<@${interaction.user.id}>`, inline: true }
       )
       .setFooter({ text: BRAND_FOOTER })
