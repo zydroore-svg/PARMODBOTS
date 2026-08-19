@@ -50,7 +50,6 @@ const REPORT_CHANNEL_IDS = (process.env.LOG_CHANNEL_IDS || LOG_CHANNEL_ID || '')
 
 // ── Google Sheets config ─────────────────────────────────────
 const SPREADSHEET_ID = '1EaadsUOc1RmdwG-8JDDP-uW8JWRs69no9KmnkLvrVSo';
-const SHEET_NAME = 'PARMOD Staff';
 
 // ── Automated Attendance Config ──────────────────────────────
 const ATTENDANCE_THRESHOLD_HOURS = 3;
@@ -349,7 +348,6 @@ function getTodayDateKey() {
   return now.toISOString().split('T')[0];
 }
 
-// Gets the timestamp for the most recent fixed weekly reset (0 = Sunday, 1 = Monday, 6 = Saturday, etc.)
 function getFixedWeeklyResetTimestamp(resetDayOfWeek = 6) {
   const now = new Date();
   const resetDate = new Date(now);
@@ -450,7 +448,7 @@ async function getModLogs(userId) {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
-// ── Google Sheets helper ────────────────────────────────────────
+// ── Google Sheets Helpers ───────────────────────────────────────
 
 async function getSheetsClient() {
   const auth = new google.auth.JWT({
@@ -461,20 +459,38 @@ async function getSheetsClient() {
   return google.sheets({ version: 'v4', auth });
 }
 
+// Dynamically auto-detect the tab name inside the Google Sheet
+async function getTargetSheetTitle(sheets) {
+  try {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    const sheetList = meta.data.sheets || [];
+    
+    const match = sheetList.find(s => {
+      const title = s.properties?.title || '';
+      return /parmod|staff/i.test(title);
+    });
+
+    if (match) return match.properties.title;
+    return sheetList[0]?.properties?.title || 'Sheet1';
+  } catch (err) {
+    console.error('Error fetching sheet metadata:', err.message);
+    return 'Sheet1';
+  }
+}
+
 async function syncStatsToSheet(guildId) {
   const sheets = await getSheetsClient();
+  const actualSheetTitle = await getTargetSheetTitle(sheets);
 
-  // Read Column A (Staff ID) from Row 2 to Row 100 using single quotes for sheet names with spaces
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `'${SHEET_NAME}'!A2:A100`,
+    range: `'${actualSheetTitle}'!A2:A100`,
   });
 
   const rows = response.data.values || [];
   if (!rows.length) return 0;
 
   const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
-
   let updatedCount = 0;
 
   for (let i = 0; i < rows.length; i++) {
@@ -491,7 +507,7 @@ async function syncStatsToSheet(guildId) {
       .get();
     const reportCount = reportsSnap.size;
 
-    // 2. Get completed shift hours (matches all-time in DB until wiped)
+    // 2. Get completed shift hours
     const shiftsSnap = await db.collection('shiftHistory')
       .where('guildId', '==', guildId)
       .where('userId', '==', cleanStaffId)
@@ -513,12 +529,12 @@ async function syncStatsToSheet(guildId) {
       .get();
     const attendanceCount = attendanceSnap.size;
 
-    const rowIndex = i + 2; // +2 offset for 1-based indexing and row 1 header
+    const rowIndex = i + 2;
 
     // 4. Write into Column G (Reports) and Column H (Duty Hours)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `'${SHEET_NAME}'!G${rowIndex}:H${rowIndex}`,
+      range: `'${actualSheetTitle}'!G${rowIndex}:H${rowIndex}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[reportCount, dutyHoursDecimal]],
@@ -528,7 +544,7 @@ async function syncStatsToSheet(guildId) {
     // 5. Write into Column J (Attendance)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `'${SHEET_NAME}'!J${rowIndex}`,
+      range: `'${actualSheetTitle}'!J${rowIndex}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[attendanceCount]],
@@ -548,14 +564,12 @@ async function checkAndRecordAttendance(guild, shift, now = Date.now()) {
   const startedMs = shift.startedAt?.toDate?.().getTime() ?? now;
   const elapsedMs = now - startedMs;
 
-  // Check if they have been active on duty for 3 hours or more
   if (elapsedMs < ATTENDANCE_THRESHOLD_MS) return;
 
   const dateKey = getTodayDateKey();
   const attendanceDocId = `${shift.guildId}_${shift.userId}_${dateKey}`;
   const attendanceRef = db.collection('attendance').doc(attendanceDocId);
 
-  // If already recorded today, skip
   const existingDoc = await attendanceRef.get();
   if (existingDoc.exists) return;
 
@@ -570,7 +584,7 @@ async function checkAndRecordAttendance(guild, shift, now = Date.now()) {
     createdAt: FieldValue.serverTimestamp(),
   });
 
-  // 2. Count weekly attendance days for this user
+  // 2. Count weekly attendance days
   const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
   const weeklyAttendanceSnap = await db.collection('attendance')
     .where('guildId', '==', shift.guildId)
@@ -580,12 +594,14 @@ async function checkAndRecordAttendance(guild, shift, now = Date.now()) {
 
   const totalWeeklyAttendanceDays = weeklyAttendanceSnap.size;
 
-  // 3. Update Column J in the Sheet for this staff member
+  // 3. Update Column J in the Sheet
   try {
     const sheets = await getSheetsClient();
+    const actualSheetTitle = await getTargetSheetTitle(sheets);
+
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: `'${SHEET_NAME}'!A2:A100`,
+      range: `'${actualSheetTitle}'!A2:A100`,
     });
 
     const rows = response.data.values || [];
@@ -595,19 +611,19 @@ async function checkAndRecordAttendance(guild, shift, now = Date.now()) {
       const sheetRowNumber = rowIndex + 2;
       await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
-        range: `'${SHEET_NAME}'!J${sheetRowNumber}`,
+        range: `'${actualSheetTitle}'!J${sheetRowNumber}`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
           values: [[totalWeeklyAttendanceDays]],
         },
       });
-      console.log(`Updated Column J for ${shift.username} to ${totalWeeklyAttendanceDays} attendance day(s).`);
+      console.log(`Updated Column J for ${shift.username} on sheet '${actualSheetTitle}' to ${totalWeeklyAttendanceDays} day(s).`);
     }
   } catch (sheetErr) {
     console.error('Failed to update attendance on Google Sheet:', sheetErr.message);
   }
 
-  // 4. Send Confirmation Mod Log
+  // 4. Send Mod Log Embed
   const attendanceEmbed = new EmbedBuilder()
     .setColor(COLORS.success)
     .setTitle('Automated Attendance Recorded')
@@ -624,7 +640,7 @@ async function checkAndRecordAttendance(guild, shift, now = Date.now()) {
 
   await sendModLog(guild, attendanceEmbed);
 
-  // 5. Notify Staff via DM
+  // 5. Notify User DM
   try {
     const member = await guild.members.fetch(shift.userId).catch(() => null);
     await member?.user.send(
@@ -1581,17 +1597,14 @@ client.on('interactionCreate', async (interaction) => {
     const target = interaction.options.getUser('user') || interaction.user;
     await interaction.deferReply();
 
-    // 6 = Saturday at 00:00 UTC
     const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
 
-    // Query weekly reports submitted SINCE the last fixed reset date
     const weeklySnap = await db.collection('report_tickets')
       .where('guildId', '==', interaction.guild.id)
       .where('reporterId', '==', target.id)
       .where('createdAt', '>=', lastWeeklyReset)
       .get();
 
-    // Query all-time reports
     const allTimeSnap = await db.collection('report_tickets')
       .where('guildId', '==', interaction.guild.id)
       .where('reporterId', '==', target.id)
@@ -1655,15 +1668,17 @@ client.on('interactionCreate', async (interaction) => {
 
     await interaction.deferReply();
 
-    // 1. Delete all Firestore attendance records for this guild
+    // 1. Delete Firestore records
     const deletedCount = await wipeCollectionForGuild('attendance', interaction.guild.id);
 
-    // 2. Reset Column J (Attendance) to 0 for all staff rows in Google Sheets
+    // 2. Reset Sheet Column J
     try {
       const sheets = await getSheetsClient();
+      const actualSheetTitle = await getTargetSheetTitle(sheets);
+
       const response = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: `'${SHEET_NAME}'!A2:A100`,
+        range: `'${actualSheetTitle}'!A2:A100`,
       });
 
       const rows = response.data.values || [];
@@ -1672,7 +1687,7 @@ client.on('interactionCreate', async (interaction) => {
       if (resetValues.length > 0) {
         await sheets.spreadsheets.values.update({
           spreadsheetId: SPREADSHEET_ID,
-          range: `'${SHEET_NAME}'!J2:J${rows.length + 1}`,
+          range: `'${actualSheetTitle}'!J2:J${rows.length + 1}`,
           valueInputOption: 'USER_ENTERED',
           requestBody: {
             values: resetValues,
