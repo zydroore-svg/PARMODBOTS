@@ -168,7 +168,7 @@ const SLASH_COMMANDS = [
 
   {
     name: 'reportscount',
-    description: 'Check reports submitted by a user (weekly & total)',
+    description: 'Check total recorded reports submitted by a user',
     options: [{ name: 'user', description: 'User to inspect (default: you)', type: 6, required: false }]
   },
 
@@ -186,7 +186,7 @@ const SLASH_COMMANDS = [
 
   {
     name: 'syncsheet',
-    description: 'Sync weekly reports, duty hours, and attendance to the Google Sheet (Staff only)',
+    description: 'Sync reports, duty hours, and attendance to the Google Sheet (Staff only)',
   },
 
   {
@@ -499,11 +499,10 @@ async function syncStatsToSheet(guildId) {
 
     const cleanStaffId = staffId.trim();
 
-    // 1. Get weekly reports count
+    // 1. Get all-time reports count (no Saturday reset filter)
     const reportsSnap = await db.collection('report_tickets')
       .where('guildId', '==', guildId)
       .where('reporterId', '==', cleanStaffId)
-      .where('createdAt', '>=', lastWeeklyReset)
       .get();
     const reportCount = reportsSnap.size;
 
@@ -1597,31 +1596,16 @@ client.on('interactionCreate', async (interaction) => {
     const target = interaction.options.getUser('user') || interaction.user;
     await interaction.deferReply();
 
-    const lastWeeklyReset = getFixedWeeklyResetTimestamp(6);
-
-    const weeklySnap = await db.collection('report_tickets')
-      .where('guildId', '==', interaction.guild.id)
-      .where('reporterId', '==', target.id)
-      .where('createdAt', '>=', lastWeeklyReset)
-      .get();
-
     const allTimeSnap = await db.collection('report_tickets')
       .where('guildId', '==', interaction.guild.id)
       .where('reporterId', '==', target.id)
       .get();
 
-    const resetDateObj = lastWeeklyReset.toDate();
-    const formattedResetDate = `<t:${Math.floor(resetDateObj.getTime() / 1000)}:D>`;
-
     const embed = new EmbedBuilder()
       .setColor(COLORS.info)
       .setTitle(`Report Submission Stats — ${target.tag}`)
       .setThumbnail(target.displayAvatarURL())
-      .setDescription(
-        `Reports submitted this week: **${weeklySnap.size}**\n` +
-        `Total all-time reports: **${allTimeSnap.size}**\n\n` +
-        `*Weekly cycle started on: ${formattedResetDate}*`
-      )
+      .setDescription(`Current recorded reports: **${allTimeSnap.size}**`)
       .setFooter({ text: BRAND_FOOTER })
       .setTimestamp();
 
@@ -1726,7 +1710,7 @@ client.on('interactionCreate', async (interaction) => {
       const embed = new EmbedBuilder()
         .setColor(COLORS.success)
         .setTitle('Google Sheet Synced')
-        .setDescription(`Successfully updated **${count}** staff member rows with this week's reports, duty hours, and attendance.`)
+        .setDescription(`Successfully updated **${count}** staff member rows with current reports, duty hours, and attendance.`)
         .setFooter({ text: BRAND_FOOTER })
         .setTimestamp();
 
@@ -1784,12 +1768,12 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle(target.username)
       .setThumbnail(target.displayAvatarURL({ size: 256 }))
       .addFields(
-        { name: 'Tag',              value: target.tag,                                                                 inline: true },
-        { name: 'ID',               value: target.id,                                                                  inline: true },
-        { name: 'Bot',              value: target.bot ? 'Yes' : 'No',                                                  inline: true },
+        { name: 'Tag',              value: target.tag,                                                         inline: true },
+        { name: 'ID',               value: target.id,                                                          inline: true },
+        { name: 'Bot',              value: target.bot ? 'Yes' : 'No',                                          inline: true },
         { name: 'Account Created',  value: `<t:${Math.floor(target.createdTimestamp / 1000)}:R>`,                     inline: true },
         { name: 'Joined Server',    value: member ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'N/A',   inline: true },
-        { name: 'Warnings',         value: `${warns.length}`,                                                          inline: true },
+        { name: 'Warnings',         value: `${warns.length}`,                                                  inline: true },
         { name: 'Roles',            value: member ? (member.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None') : 'N/A' },
       )
       .setFooter({ text: BRAND_FOOTER })
@@ -1804,14 +1788,14 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle(g.name)
       .setThumbnail(g.iconURL({ size: 256 }))
       .addFields(
-        { name: 'Owner',        value: `<@${g.ownerId}>`,                                  inline: true },
-        { name: 'ID',           value: g.id,                                               inline: true },
-        { name: 'Created',      value: `<t:${Math.floor(g.createdTimestamp / 1000)}:R>`,   inline: true },
-        { name: 'Members',      value: `${g.memberCount}`,                                 inline: true },
-        { name: 'Channels',     value: `${g.channels.cache.size}`,                         inline: true },
-        { name: 'Roles',        value: `${g.roles.cache.size}`,                            inline: true },
-        { name: 'Boost Level',  value: `Level ${g.premiumTier} (${g.premiumSubscriptionCount} boosts)`,  inline: true },
-        { name: 'Verification', value: ['None','Low','Medium','High','Very High'][g.verificationLevel],  inline: true },
+        { name: 'Owner',        value: `<@${g.ownerId}>`,                                                 inline: true },
+        { name: 'ID',           value: g.id,                                                               inline: true },
+        { name: 'Created',      value: `<t:${Math.floor(g.createdTimestamp / 1000)}:R>`,                   inline: true },
+        { name: 'Members',      value: `${g.memberCount}`,                                                 inline: true },
+        { name: 'Channels',     value: `${g.channels.cache.size}`,                                         inline: true },
+        { name: 'Roles',        value: `${g.roles.cache.size}`,                                            inline: true },
+        { name: 'Boost Level',  value: `Level ${g.premiumTier} (${g.premiumSubscriptionCount} boosts)`,   inline: true },
+        { name: 'Verification', value: ['None','Low','Medium','High','Very High'][g.verificationLevel],   inline: true },
       )
       .setFooter({ text: BRAND_FOOTER })
       .setTimestamp();
@@ -1824,12 +1808,12 @@ client.on('interactionCreate', async (interaction) => {
     const embed = new EmbedBuilder().setColor(role.color || COLORS.primary)
       .setTitle(role.name)
       .addFields(
-        { name: 'ID',               value: role.id,                               inline: true },
-        { name: 'Color',            value: role.hexColor,                         inline: true },
-        { name: 'Position',         value: `${role.position}`,                    inline: true },
-        { name: 'Members',          value: `${role.members.size}`,                inline: true },
-        { name: 'Mentionable',      value: role.mentionable ? 'Yes' : 'No',        inline: true },
-        { name: 'Hoisted',          value: role.hoist ? 'Yes' : 'No',             inline: true },
+        { name: 'ID',               value: role.id,                                           inline: true },
+        { name: 'Color',            value: role.hexColor,                                     inline: true },
+        { name: 'Position',         value: `${role.position}`,                                inline: true },
+        { name: 'Members',          value: `${role.members.size}`,                            inline: true },
+        { name: 'Mentionable',      value: role.mentionable ? 'Yes' : 'No',                   inline: true },
+        { name: 'Hoisted',          value: role.hoist ? 'Yes' : 'No',                         inline: true },
         { name: 'Created',          value: `<t:${Math.floor(role.createdTimestamp / 1000)}:R>`, inline: true },
         { name: 'Key Permissions', value: perms },
       )
@@ -2014,8 +1998,8 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle('Member Banned')
         .addFields(
           { name: 'User',             value: `${target.tag} (${target.id})`, inline: true },
-          { name: 'By',               value: interaction.user.tag,            inline: true },
-          { name: 'Messages Deleted', value: `${days} day(s)`,               inline: true },
+          { name: 'By',               value: interaction.user.tag,             inline: true },
+          { name: 'Messages Deleted', value: `${days} day(s)`,                inline: true },
           { name: 'Reason',           value: reason },
         )
         .setFooter({ text: BRAND_FOOTER })
